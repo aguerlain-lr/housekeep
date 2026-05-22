@@ -1,44 +1,49 @@
-# housekeep
+# Housekeep
 
-Small Claude Code skills for keeping your dev workflow tidy.
+Four tiny Claude Code skills for keeping your dev workflow tidy. No daemons, no shared state, no opinions beyond what's in each `SKILL.md`. The whole plugin is plain Markdown — anything that can read a skill can run them.
 
-Four self-contained skills. No external services, no shared state, no opinions beyond what's in each file. Drop them into `~/.claude/skills/` (or your project's `.claude/skills/`) and Claude Code will pick them up.
-
-## The skills
-
-| Skill | Trigger | What it does |
-|-------|---------|--------------|
-| [`todo`](skills/todo/SKILL.md) | `/todo <task>` | Append a task to `~/.claude/todos.md`. That's it. |
-| [`do`](skills/do/SKILL.md) | `/do` | Show pending todos, pick one, execute it. |
-| [`papercut`](skills/papercut/SKILL.md) | `/papercut <annoyance>` | Capture mid-conversation workflow friction to `~/.papercut/wiki.md` without derailing the current task. |
-| [`audit-permission-requests`](skills/audit-permission-requests/SKILL.md) | `/audit-permission-requests` | Analyze the Claude Code permission log to find safe commands to auto-allow, wrapping opportunities, and settings consolidation. |
+---
 
 ## Install
 
-```bash
-git clone https://github.com/aguerlain-lr/housekeep.git
-mkdir -p ~/.claude/skills
-cp -r housekeep/skills/* ~/.claude/skills/
-```
-
-Or symlink if you want updates from `git pull` to flow through:
+### Claude Code
 
 ```bash
-for skill in housekeep/skills/*/; do
-  ln -s "$PWD/$skill" "$HOME/.claude/skills/$(basename "$skill")"
-done
+claude plugin marketplace add aguerlain-lr/housekeep
+claude plugin install housekeep@housekeep
 ```
 
-## Philosophy
+To pick up updates:
 
-- **One job per skill.** A skill should be small enough that you can read it in 30 seconds.
-- **Plain files, no daemons.** `~/.claude/todos.md` is just a markdown file. Edit it by hand any time.
-- **Capture friction without breaking flow.** `/papercut` is for the things you'd never bother to file an issue about — log them and keep working.
-- **Audit your own permission noise.** If Claude Code prompts you for the same command 50 times a week, that's a config bug, not a feature. The audit skill is how you find it.
+```bash
+claude plugin update housekeep@housekeep
+```
 
-## The `audit-permission-requests` setup
+### Other agents
 
-This one needs a hook to start logging permission requests. Add to `~/.claude/settings.json`:
+Any agent that loads skills from a directory works. Clone the repo and point the agent at `skills/`:
+
+```bash
+git clone git@github.com:aguerlain-lr/housekeep.git ~/dev/housekeep
+```
+
+---
+
+## What You Get
+
+**`todo`** — `/todo <task>` appends a checkbox line to `~/.claude/todos.md`. That's it. Plain markdown file, edit by hand any time.
+
+**`do`** — `/do` reads pending todos, presents them as a picker, marks the chosen one done, and executes it inline. Use full agent judgment — read code, write code, search, whatever the task requires.
+
+**`papercut`** — `/papercut <annoyance>` logs mid-conversation workflow friction to `~/.papercut/wiki.md` without derailing the current task. For the small wrongnesses you'd never bother to file a real issue for — log them and keep working.
+
+**`audit-permission-requests`** — `/audit-permission-requests` analyzes `~/.claude/permission-requests.log` to find safe commands to auto-allow, wrapping opportunities for read/write-dual tools (gh, aws, curl), and consolidation candidates in your existing `settings.json` allow rules. Produces a structured report you can act on directly.
+
+---
+
+## The `audit-permission-requests` hook
+
+This one needs a `PermissionRequest` hook to start logging. Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -54,6 +59,17 @@ This one needs a hook to start logging permission requests. Add to `~/.claude/se
 
 The skill itself documents the full analysis flow once the log starts filling up.
 
+---
+
+## Philosophy
+
+- **One job per skill.** Each `SKILL.md` is short enough to read in 30 seconds.
+- **Plain files, no daemons.** Todos and papercuts are markdown files in your home dir. Editable by hand. Greppable. Sync however you sync dotfiles.
+- **Capture friction without breaking flow.** `/papercut` exists because the things that bug you mid-task are exactly the things you'll forget by the time you have time to fix them.
+- **Audit your own permission noise.** If your harness prompts you for the same command 50 times a week, that's a config bug, not a feature. The audit skill finds it.
+
+---
+
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

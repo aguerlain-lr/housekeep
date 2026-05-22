@@ -1,0 +1,12 @@
+{
+  "name": "housekeep",
+  "description": "Small Claude Code skills for keeping your dev workflow tidy: todo, do, papercut, audit-permission-requests.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Andre Guerlain"
+  },
+  "homepage": "https://github.com/aguerlain-lr/housekeep",
+  "repository": "https://github.com/aguerlain-lr/housekeep",
+  "license": "MIT",
+  "keywords": ["claude-code", "skills", "todo", "papercut", "permissions"]
+}

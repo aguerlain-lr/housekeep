@@ -1,0 +1,18 @@
+{
+  "name": "housekeep",
+  "description": "Small Claude Code skills for keeping your dev workflow tidy",
+  "owner": {
+    "name": "Andre Guerlain"
+  },
+  "plugins": [
+    {
+      "name": "housekeep",
+      "description": "Four housekeeping skills: todo, do, papercut, audit-permission-requests.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "Andre Guerlain"
+      }
+    }
+  ]
+}
