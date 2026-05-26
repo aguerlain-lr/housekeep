@@ -7,8 +7,8 @@
   "plugins": [
     {
       "name": "housekeep",
-      "description": "Four housekeeping skills: todo, do, papercut, audit-permission-requests.",
-      "version": "0.1.0",
+      "description": "Four housekeeping skills plus a prefer-dedicated-tools Bash hook.",
+      "version": "0.2.0",
       "source": "./",
       "author": {
         "name": "Andre Guerlain"

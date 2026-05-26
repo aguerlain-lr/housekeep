@@ -1,6 +1,6 @@
 # Housekeep
 
-Four tiny Claude Code skills for keeping your dev workflow tidy. No daemons, no shared state, no opinions beyond what's in each `SKILL.md`. The whole plugin is plain Markdown — anything that can read a skill can run them.
+Four tiny Claude Code skills plus one optional hook for keeping your dev workflow tidy. No daemons, no shared state, no opinions beyond what's in each `SKILL.md`. The skills are plain Markdown — anything that can read a skill can run them.
 
 ---
 
@@ -39,6 +39,8 @@ git clone git@github.com:aguerlain-lr/housekeep.git ~/dev/housekeep
 
 **`audit-permission-requests`** — `/audit-permission-requests` analyzes `~/.claude/permission-requests.log` to find safe commands to auto-allow, wrapping opportunities for read/write-dual tools (gh, aws, curl), and consolidation candidates in your existing `settings.json` allow rules. Produces a structured report you can act on directly.
 
+**`prefer-dedicated-tools`** — a `PreToolUse` hook for Bash that blocks `cat`, `head`, `tail`, `sed -n`, `grep`, `rg`, and `find` when invoked as the first command in the string. Forces use of Claude's dedicated `Read`, `Grep`, and `Glob` tools, which are faster, structured, and friendlier to the harness. Pipeline filters (`... | grep foo`) and transformation `sed` are left alone.
+
 ---
 
 ## The `audit-permission-requests` hook
@@ -58,6 +60,51 @@ This one needs a `PermissionRequest` hook to start logging. Add to `~/.claude/se
 ```
 
 The skill itself documents the full analysis flow once the log starts filling up.
+
+---
+
+## The `prefer-dedicated-tools` hook
+
+This one is a `PreToolUse` hook that intercepts Bash calls and blocks the read/search commands that have dedicated Claude tools. Useful if your agent keeps reaching for `cat`/`grep`/`find` out of muscle memory when `Read`/`Grep`/`Glob` would be faster and structured.
+
+The script lives at `hooks/prefer-dedicated-tools.sh` in this repo. Install in one of two ways.
+
+**Option A — installed via the plugin (recommended):**
+
+```json
+{
+  "PreToolUse": [{
+    "matcher": "Bash",
+    "hooks": [{
+      "type": "command",
+      "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/prefer-dedicated-tools.sh"
+    }]
+  }]
+}
+```
+
+`${CLAUDE_PLUGIN_ROOT}` resolves to the installed plugin path, so the rule keeps working across updates.
+
+**Option B — cloned manually:** copy or symlink the script into `~/.claude/hooks/`, then point at the absolute path:
+
+```bash
+cp ~/dev/housekeep/hooks/prefer-dedicated-tools.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/prefer-dedicated-tools.sh
+```
+
+```json
+{
+  "PreToolUse": [{
+    "matcher": "Bash",
+    "hooks": [{
+      "type": "command",
+      "command": "bash ~/.claude/hooks/prefer-dedicated-tools.sh"
+    }]
+  }]
+}
+```
+
+The hook exits with code `2` and a short explanation when it blocks, so the agent sees exactly why and can switch to the right tool.
 
 ---
 
