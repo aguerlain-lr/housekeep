@@ -1,6 +1,6 @@
 # Housekeep
 
-Five Claude Code skills plus one optional hook for keeping your dev workflow tidy. No daemons, no shared state, no opinions beyond what's in each `SKILL.md`.
+Five Claude Code skills plus two optional hooks for keeping your dev workflow tidy. No daemons, no shared state, no opinions beyond what's in each `SKILL.md`.
 
 Most skills are plain Markdown — anything that can read a skill can run them. The exception is `setup-housekeep`, which installs an MCP server and therefore requires a Node.js toolchain on the target machine (see [Requirements](#requirements) below).
 
