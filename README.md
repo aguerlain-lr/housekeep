@@ -8,11 +8,12 @@ Most skills are plain Markdown — anything that can read a skill can run them. 
 
 ## Requirements
 
-| Skill / hook | Mechanical deps | Functional deps |
-|---|---|---|
-| `todo`, `do`, `papercut`, `audit-permission-requests` | An agent that reads `SKILL.md`. | None. Plain markdown. |
-| `setup-housekeep` | `node ≥18`, `npm`, `jq`, `ripgrep` (standalone binary, not the Claude Code shim). | Installs the `local-search` MCP — a small Node runtime layer over ripgrep. |
-| `prefer-dedicated-tools` (hook) | `bash`, `jq`. | Either native Claude Code `Grep`/`Glob` tools **or** `setup-housekeep` installed (which transitively requires `node ≥18`, `npm`, `jq`, `ripgrep`). The hook blocks bash `grep`/`rg`/`find` and tells the agent to use a dedicated tool; if no dedicated tool exists in the session, the agent has nowhere to go. |
+| Skill / hook | Needs |
+|---|---|
+| `todo`, `do`, `papercut`, `audit-permission-requests` | An agent that reads `SKILL.md`. Plain markdown — no runtime deps. |
+| `setup-housekeep` | `node ≥18`, `npm`, `jq`, `ripgrep` (standalone binary, not the Claude Code shim). Installs the `local-search` MCP — a small Node runtime layer over ripgrep. |
+| `prefer-dedicated-tools` (hook) | `bash`, `jq` to run the hook script itself — **plus** either native Claude Code `Grep`/`Glob` tools or `setup-housekeep` installed (which adds `node ≥18`, `npm`, `ripgrep`). The hook blocks bash `grep`/`rg`/`find` and tells the agent to use a dedicated tool; if no dedicated tool exists in the session, the agent has nowhere to go. |
+| `audit-permission-requests` (log hook) | `jq`. Async one-liner appended to `~/.claude/permission-requests.log` on every permission prompt. |
 
 If you don't want a Node toolchain on this machine:
 - Skip `setup-housekeep`.
