@@ -1,12 +1,12 @@
 {
   "name": "housekeep",
-  "description": "Small Claude Code skills for keeping your dev workflow tidy: todo, do, papercut, audit-permission-requests, plus a prefer-dedicated-tools Bash hook.",
-  "version": "0.2.0",
+  "description": "Small Claude Code skills for keeping your dev workflow tidy: todo, do, papercut, audit-permission-requests, setup-housekeep (installs a read-only local-search MCP — ripgrep-backed Grep/Glob with path-allowlist gating, and optionally wires the prefer-dedicated-tools Bash hook and audit-permission-requests log hook), plus the prefer-dedicated-tools hook script itself.",
+  "version": "0.3.0",
   "author": {
     "name": "Andre Guerlain"
   },
   "homepage": "https://github.com/aguerlain-lr/housekeep",
   "repository": "https://github.com/aguerlain-lr/housekeep",
   "license": "MIT",
-  "keywords": ["claude-code", "skills", "hooks", "todo", "papercut", "permissions"]
+  "keywords": ["claude-code", "skills", "hooks", "todo", "papercut", "permissions", "mcp", "ripgrep", "grep", "glob"]
 }

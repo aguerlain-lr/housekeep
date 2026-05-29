@@ -1,0 +1,132 @@
+#!/usr/bin/env node
+/**
+ * local-search-allow — grant the local-search MCP server access to a path.
+ *
+ *   local-search-allow once    /abs/path     # single-use token (TTL 30s)
+ *   local-search-allow session /abs/path     # adds to <cwd>/.claude/settings.local.json
+ *   local-search-allow always  /abs/path     # adds to ~/.claude/settings.json
+ *   local-search-allow list                  # show current allowed dirs across scopes
+ *   local-search-allow clear                 # remove all once-tokens
+ *
+ * Paths are resolved against the current working directory if relative.
+ */
+
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { resolve, dirname, isAbsolute } from "node:path";
+import { homedir } from "node:os";
+
+const ONCE_FILE = `${homedir()}/.claude/local-search-once.json`;
+const ONCE_TTL_MS = 30_000;
+
+function readJSON(path, fallback) {
+  if (!existsSync(path)) return fallback;
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (e) {
+    console.error(`error: failed to parse ${path}: ${e.message}`);
+    process.exit(2);
+  }
+}
+
+function writeJSONAtomic(path, data) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n");
+  renameSync(tmp, path);
+}
+
+function expand(p) {
+  return p.replace(/^~/, homedir());
+}
+
+function absPath(p) {
+  return isAbsolute(p) ? p : resolve(process.cwd(), p);
+}
+
+function addDirToSettings(file, dir) {
+  const data = readJSON(file, {});
+  data.permissions ||= {};
+  data.permissions.additionalDirectories ||= [];
+  if (!data.permissions.additionalDirectories.includes(dir)) {
+    data.permissions.additionalDirectories.push(dir);
+  }
+  writeJSONAtomic(file, data);
+}
+
+function cmdOnce(dir) {
+  const data = readJSON(ONCE_FILE, { tokens: [] });
+  data.tokens = (data.tokens || []).filter((t) => Date.now() - t.created_at < ONCE_TTL_MS);
+  data.tokens.push({ path: dir, created_at: Date.now(), pid: process.pid });
+  writeJSONAtomic(ONCE_FILE, data);
+  console.log(`once-token written for ${dir} (TTL ${ONCE_TTL_MS / 1000}s).`);
+}
+
+function cmdSession(dir) {
+  const file = `${process.cwd()}/.claude/settings.local.json`;
+  addDirToSettings(file, dir);
+  console.log(`Added ${dir} to ${file}.`);
+  console.log(`Scope: this project only. Remove manually to revoke.`);
+}
+
+function cmdAlways(dir) {
+  const file = `${homedir()}/.claude/settings.json`;
+  addDirToSettings(file, dir);
+  console.log(`Added ${dir} to ${file}.`);
+  console.log(`Scope: all projects. Edit settings.json to revoke.`);
+}
+
+function cmdList() {
+  const cwd = process.cwd();
+  const files = [
+    [`global  (~/.claude/settings.json)`, `${homedir()}/.claude/settings.json`],
+    [`project (${cwd}/.claude/settings.json)`, `${cwd}/.claude/settings.json`],
+    [`local   (${cwd}/.claude/settings.local.json)`, `${cwd}/.claude/settings.local.json`],
+  ];
+  for (const [label, f] of files) {
+    const data = readJSON(f, null);
+    const dirs = data?.permissions?.additionalDirectories || [];
+    console.log(`${label}: ${dirs.length === 0 ? "(none)" : ""}`);
+    for (const d of dirs) console.log(`  ${d}`);
+  }
+  const once = readJSON(ONCE_FILE, { tokens: [] });
+  const fresh = (once.tokens || []).filter((t) => Date.now() - t.created_at < ONCE_TTL_MS);
+  console.log(`once-tokens (fresh): ${fresh.length === 0 ? "(none)" : ""}`);
+  for (const t of fresh) {
+    const age = Math.floor((Date.now() - t.created_at) / 1000);
+    console.log(`  ${t.path}  (age ${age}s, pid ${t.pid})`);
+  }
+}
+
+function cmdClear() {
+  writeJSONAtomic(ONCE_FILE, { tokens: [] });
+  console.log(`Cleared all once-tokens.`);
+}
+
+function usage() {
+  console.error(
+    `usage:\n` +
+      `  local-search-allow once    <path>\n` +
+      `  local-search-allow session <path>\n` +
+      `  local-search-allow always  <path>\n` +
+      `  local-search-allow list\n` +
+      `  local-search-allow clear`
+  );
+  process.exit(2);
+}
+
+const [tier, raw] = process.argv.slice(2);
+if (!tier) usage();
+if (tier === "list") {
+  cmdList();
+  process.exit(0);
+}
+if (tier === "clear") {
+  cmdClear();
+  process.exit(0);
+}
+if (!raw) usage();
+const dir = absPath(expand(raw));
+if (tier === "once") cmdOnce(dir);
+else if (tier === "session") cmdSession(dir);
+else if (tier === "always") cmdAlways(dir);
+else usage();
