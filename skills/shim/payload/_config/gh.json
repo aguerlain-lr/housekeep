@@ -1,0 +1,24 @@
+{
+  "tool": "gh",
+  "real": null,
+  "real_alias": "gh-real",
+  "global_flags_with_value": ["-R", "--repo", "--hostname"],
+  "safe": [
+    ["pr", "view"],
+    ["pr", "list"],
+    ["pr", "diff"],
+    ["pr", "checks"],
+    ["pr", "status"],
+    ["issue", "view"],
+    ["issue", "list"],
+    ["issue", "status"],
+    ["run", "view"],
+    ["run", "list"],
+    ["workflow", "view"],
+    ["workflow", "list"],
+    ["repo", "view"],
+    ["release", "view"],
+    ["release", "list"],
+    ["auth", "status"]
+  ]
+}

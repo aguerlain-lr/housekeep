@@ -1,0 +1,19 @@
+{
+  "tool": "docker",
+  "real": null,
+  "real_alias": "docker-real",
+  "global_flags_with_value": ["-H", "--host", "--context", "--config"],
+  "safe": [
+    ["ps"],
+    ["images"],
+    ["inspect"],
+    ["logs"],
+    ["version"],
+    ["info"],
+    ["history"],
+    ["network", "ls"],
+    ["network", "inspect"],
+    ["volume", "ls"],
+    ["volume", "inspect"]
+  ]
+}

@@ -1,8 +1,8 @@
 # Housekeep
 
-Five Claude Code skills plus two optional hooks for keeping your dev workflow tidy. No daemons, no shared state, no opinions beyond what's in each `SKILL.md`.
+Six Claude Code skills plus two optional hooks for keeping your dev workflow tidy. No daemons, no shared state, no opinions beyond what's in each `SKILL.md`.
 
-Most skills are plain Markdown — anything that can read a skill can run them. The exception is `setup-housekeep`, which installs an MCP server and therefore requires a Node.js toolchain on the target machine (see [Requirements](#requirements) below).
+Most skills are plain Markdown — anything that can read a skill can run them. The exceptions are `setup-housekeep` (installs an MCP server, needs Node) and `shim` (installs PATH-based CLI shims, needs zsh + jq). See [Requirements](#requirements) below.
 
 ---
 
@@ -14,6 +14,7 @@ Most skills are plain Markdown — anything that can read a skill can run them. 
 | `setup-housekeep` | `node ≥18`, `npm`, `jq`, `ripgrep` (standalone binary, not the Claude Code shim). Installs the `local-search` MCP — a small Node runtime layer over ripgrep. |
 | `prefer-dedicated-tools` (hook) | `bash`, `jq` to run the hook script itself — **plus** either native Claude Code `Grep`/`Glob` tools or `setup-housekeep` installed (which adds `node ≥18`, `npm`, `ripgrep`). The hook blocks bash `grep`/`rg`/`find` and tells the agent to use a dedicated tool; if no dedicated tool exists in the session, the agent has nowhere to go. |
 | `audit-permission-requests` (log hook) | `jq`. Async one-liner appended to `~/.claude/permission-requests.log` on every permission prompt. |
+| `shim` | `zsh` (your interactive shell — Claude Code spawns zsh via the user's `$SHELL`), `jq`, and the real binary of each tool you shim (`gh`, `kubectl`, etc.). Modifies `~/.zshrc` with a marker-delimited block guarded by `CLAUDE_CODE_EXECPATH`. Requires one Claude Code restart after `/shim setup` so the shell snapshot regenerates with the shimmed PATH. |
 
 If you don't want a Node toolchain on this machine:
 - Skip `setup-housekeep`.
@@ -58,6 +59,8 @@ git clone git@github.com:aguerlain-lr/housekeep.git ~/dev/housekeep
 **`audit-permission-requests`** — `/audit-permission-requests` analyzes `~/.claude/permission-requests.log` to find safe commands to auto-allow, wrapping opportunities for read/write-dual tools (gh, aws, curl), and consolidation candidates in your existing `settings.json` allow rules. Produces a structured report you can act on directly.
 
 **`setup-housekeep`** — `/setup-housekeep` installs the optional `local-search` MCP server: read-only `Grep` and `Glob` tools backed by ripgrep, mirroring the native Claude Code API for builds that ship without them. Sandboxed to project roots by default; outside-project searches prompt for approval (once / session / always). Wires up `~/.claude.json`, `~/.claude/settings.json` permissions + the local-search PreToolUse hook, installs a `local-search-allow` CLI, and inserts a marker-delimited guidance block in `~/.claude/CLAUDE.md`. With consent, also wires the two companion hooks below (`prefer-dedicated-tools` and `audit-permission-requests` log). All steps idempotent — re-run after pulling updates.
+
+**`shim`** — `/shim setup` + `/shim add <tool>` installs PATH-based CLI shims (`~/.claude/shims/<tool>`) that route safe subcommands directly to the real binary and rebuff unsafe ones to a `<tool>-real` symlink. The shim PATH is prepended to `PATH` only when `CLAUDE_CODE_EXECPATH` is set, so the user's interactive terminal is untouched. Ships conservative default safe lists for `gh`, `kubectl`, `gsutil`, `docker` (read-only ops only). The shim policy lives in `~/.claude/shims/_config/<tool>.json`; editing the JSON is the way to extend / restrict the safe surface per tool. Permission rule `Bash(<tool>:*)` becomes safe by construction once the shim is installed — no CLAUDE.md guidance needed.
 
 **`prefer-dedicated-tools`** — a `PreToolUse` hook for Bash that blocks `cat`, `head`, `tail`, `sed -n`, `grep`, `rg`, and `find` when invoked as the first command in the string. Forces use of Claude's dedicated `Read`, `Grep`, and `Glob` tools, which are faster, structured, and friendlier to the harness. Pipeline filters (`... | grep foo`) and transformation `sed` are left alone. Pairs naturally with `setup-housekeep` — if your build lacks native `Grep`/`Glob`, the local-search MCP fills the gap.
 

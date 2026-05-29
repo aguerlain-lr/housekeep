@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# housekeep shim-runner.
+#
+# Invoked via symlink at ~/.claude/shims/<tool>. Reads ~/.claude/shims/_config/<tool>.json,
+# checks the caller's positional args against the configured safe-subcommand prefix list,
+# and either exec's the real binary or rebuffs the agent and points it at <tool>-real
+# (which lives next to the shim as a symlink to the real binary).
+#
+# Built-in deny: shim-runner does not enforce anything itself — defense in depth is in
+# the permission allowlist. The shim is the routing layer; the safe list is policy.
+
+set -euo pipefail
+
+TOOL="${0##*/}"
+# $0 is the invoked symlink path (e.g. ~/.claude/shims/gh), so dirname IS the shims dir.
+SHIMS_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+CONFIG="$SHIMS_DIR/_config/$TOOL.json"
+
+if [ ! -f "$CONFIG" ]; then
+  echo "shim-runner: no config for '$TOOL' at $CONFIG" >&2
+  exit 2
+fi
+
+REAL=$(jq -r '.real // empty' "$CONFIG")
+REAL_ALIAS=$(jq -r '.real_alias // empty' "$CONFIG")
+
+if [ -z "$REAL" ] || [ ! -x "$REAL" ]; then
+  echo "shim-runner: $TOOL config .real is missing or not executable: $REAL" >&2
+  echo "  Edit $CONFIG and set .real to the real binary path." >&2
+  exit 2
+fi
+
+# Read global flags that consume the next argument (their value lives in the next argv slot).
+# Using a read loop instead of mapfile for bash 3.2 compatibility (macOS default).
+FLAGS_WITH_VALUE=()
+while IFS= read -r line; do
+  [ -n "$line" ] && FLAGS_WITH_VALUE+=("$line")
+done < <(jq -r '(.global_flags_with_value // [])[]' "$CONFIG")
+
+# Walk argv, building positional-only list. Skips flags + their values.
+# This is heuristic — without per-flag knowledge, "--unknown value" parses 'value' as
+# positional. Safe-list match cares about PREFIX, so misclassified later tokens don't
+# break matching of legitimate subcommands at the front.
+POSITIONAL=()
+ALL=("$@")
+i=0
+while [ $i -lt ${#ALL[@]} ]; do
+  arg="${ALL[$i]}"
+  case "$arg" in
+    --)
+      i=$((i + 1))
+      while [ $i -lt ${#ALL[@]} ]; do
+        POSITIONAL+=("${ALL[$i]}")
+        i=$((i + 1))
+      done
+      break
+      ;;
+    -*=*)
+      : # flag with inline value — just skip
+      ;;
+    -*)
+      consumes=0
+      for f in ${FLAGS_WITH_VALUE[@]+"${FLAGS_WITH_VALUE[@]}"}; do
+        if [ "$arg" = "$f" ]; then
+          consumes=1
+          break
+        fi
+      done
+      if [ $consumes -eq 1 ]; then
+        i=$((i + 1)) # skip the value
+      fi
+      ;;
+    *)
+      POSITIONAL+=("$arg")
+      ;;
+  esac
+  i=$((i + 1))
+done
+
+# Match positional prefix (depth 1..3) against the safe list. The safe list is an
+# array of arrays in JSON; each inner array is a prefix that allows the call.
+SAFE_JSON=$(jq -c '.safe // []' "$CONFIG")
+MATCHED=0
+MAX=${#POSITIONAL[@]}
+[ $MAX -gt 3 ] && MAX=3
+for ((n = 1; n <= MAX; n++)); do
+  prefix_json=$(printf '%s\n' "${POSITIONAL[@]:0:$n}" | jq -R . | jq -s -c .)
+  if jq -e --argjson p "$prefix_json" 'any(. == $p)' <<<"$SAFE_JSON" >/dev/null 2>&1; then
+    MATCHED=1
+    break
+  fi
+done
+
+if [ $MATCHED -eq 1 ]; then
+  exec "$REAL" "$@"
+fi
+
+# Rebuff
+{
+  echo "$TOOL: '${POSITIONAL[*]:-<no args>}' is not in the housekeep safe-subcommand list."
+  echo
+  echo "Safe ops for $TOOL:"
+  jq -r '.safe // [] | map(join(" ")) | .[]' "$CONFIG" | sed 's/^/  /'
+  if [ -n "$REAL_ALIAS" ]; then
+    echo
+    echo "If you need this op, use '$REAL_ALIAS' instead (will prompt for user approval)."
+  fi
+  echo
+  echo "To add this op to the safe list, edit: $CONFIG"
+} >&2
+exit 1

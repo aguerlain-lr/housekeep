@@ -1,0 +1,29 @@
+{
+  "tool": "kubectl",
+  "real": null,
+  "real_alias": "kubectl-real",
+  "global_flags_with_value": [
+    "-n", "--namespace",
+    "--context",
+    "--kubeconfig",
+    "--cluster",
+    "--user",
+    "--as",
+    "--as-group",
+    "--server",
+    "--token"
+  ],
+  "safe": [
+    ["get"],
+    ["describe"],
+    ["top"],
+    ["version"],
+    ["cluster-info"],
+    ["api-resources"],
+    ["api-versions"],
+    ["config", "view"],
+    ["config", "get-contexts"],
+    ["config", "current-context"],
+    ["explain"]
+  ]
+}

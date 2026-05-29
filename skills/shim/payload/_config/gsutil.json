@@ -1,0 +1,14 @@
+{
+  "tool": "gsutil",
+  "real": null,
+  "real_alias": "gsutil-real",
+  "global_flags_with_value": ["-o", "-h"],
+  "safe": [
+    ["ls"],
+    ["cat"],
+    ["stat"],
+    ["du"],
+    ["hash"],
+    ["version"]
+  ]
+}

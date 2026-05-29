@@ -7,8 +7,8 @@
   "plugins": [
     {
       "name": "housekeep",
-      "description": "Five housekeeping skills (todo, do, papercut, audit-permission-requests, setup-housekeep) plus a prefer-dedicated-tools Bash hook and an audit-permission-requests log hook. setup-housekeep installs a read-only local-search MCP (ripgrep-backed Grep/Glob with path-allowlist gating) and optionally wires both companion hooks. All idempotent.",
-      "version": "0.3.0",
+      "description": "Six housekeeping skills (todo, do, papercut, audit-permission-requests, setup-housekeep, shim) plus a prefer-dedicated-tools Bash hook and an audit-permission-requests log hook. setup-housekeep installs a read-only local-search MCP (ripgrep-backed Grep/Glob). shim installs PATH-based CLI shims that route safe subcommands directly and rebuff unsafe ones to a -real escape hatch — scoped to Claude sessions only via CLAUDE_CODE_EXECPATH. All idempotent.",
+      "version": "0.4.0",
       "source": "./",
       "author": {
         "name": "Andre Guerlain"
