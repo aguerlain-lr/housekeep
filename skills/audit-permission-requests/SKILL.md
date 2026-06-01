@@ -1,11 +1,27 @@
 ---
 name: audit-permission-requests
-description: Use when reviewing ~/.claude/permission-requests.log to find safe commands to auto-allow, find wrapping opportunities, or audit existing settings rules for consolidation opportunities
+description: Use when reviewing ~/.claude/permission-requests.log to triage what's prompting, build safe-tool wrappers (gh-safe etc.), or audit existing settings.json rules for consolidation opportunities. For bulk allowlist generation from observed usage, prefer the built-in /fewer-permission-prompts skill.
 ---
 
 # Audit Permission Requests
 
-Analyze the permission log to reduce unnecessary approval prompts and improve safety posture.
+Focused on **what `/fewer-permission-prompts` does not do**: log-based triage, safe-wrapper construction, and consolidation audits of existing `permissions.allow` rules.
+
+## Relationship to `/fewer-permission-prompts`
+
+The built-in `/fewer-permission-prompts` skill scans session transcripts (`~/.claude/projects/<cwd>/*.jsonl`) and emits a prioritized allowlist that it auto-merges into project `.claude/settings.json`. It has up-to-date knowledge of Claude Code's built-in auto-allow lists (`READONLY_COMMANDS`, `GIT_READ_ONLY_COMMANDS`, etc.) and the never-allowlist rules (interpreters, shells, package runners).
+
+**Use `/fewer-permission-prompts` for:**
+- Surfacing a ranked list of safe commands to add to `permissions.allow`
+- Auto-merging suggestions into project settings
+
+**Use this skill for:**
+- Fast triage of `~/.claude/permission-requests.log` — only contains things that actually prompted, so it's a much smaller and more accurate signal than scanning full transcripts
+- Designing **wrappers** that transform dual-nature tools (`gh`, `aws`, `curl`) into safe-by-construction binaries
+- **Consolidation audits** — analyzing existing `permissions.allow` rules to find merge candidates vs. intentional omissions
+- Log maintenance
+
+You can also pipe the log to `/fewer-permission-prompts` as input by invoking the skill with the archived log path as an argument — substantially faster than its default transcript scan.
 
 ## Log File
 
@@ -43,11 +59,13 @@ A **stream of standalone JSON objects** — not an array, not ndjson. Each entry
 | `permission_mode` | Active mode: `default`, `acceptEdits`, `bypassPermissions` |
 | `logged_at` | ISO 8601 timestamp |
 
-## Analysis Commands
+## Triage Recipes
 
-**Summarize all requests:**
+Only things that actually prompted are in this log — pre-filtered signal. Each recipe answers a specific question.
+
+**What's prompting most often:**
 ```bash
-jq -r '.tool_name + " | " + (.tool_input.command // .tool_input.file_path // "n/a")' ~/.claude/permission-requests.log
+jq -r '.tool_name + " | " + (.tool_input.command // .tool_input.file_path // "n/a")' ~/.claude/permission-requests.log | sort | uniq -c | sort -rn | head -20
 ```
 
 **Count by tool:**
@@ -60,7 +78,12 @@ jq -s 'group_by(.tool_name) | map({tool: .[0].tool_name, count: length})' ~/.cla
 jq -r 'select(.tool_name == "Bash") | .tool_input.command' ~/.claude/permission-requests.log
 ```
 
-**What Claude suggested allowing (deduplicated):**
+**Top-level Bash command frequency (find wrapping/consolidation candidates):**
+```bash
+jq -r 'select(.tool_name == "Bash") | .tool_input.command' ~/.claude/permission-requests.log | awk '{print $1}' | sort | uniq -c | sort -rn | head -20
+```
+
+**What Claude already suggested allowing (deduplicated):**
 ```bash
 jq -s '[.[] | .permission_suggestions[]?.rules[]? | {tool: .toolName, rule: .ruleContent}] | unique_by(.rule)' ~/.claude/permission-requests.log
 ```
@@ -70,89 +93,81 @@ jq -s '[.[] | .permission_suggestions[]?.rules[]? | {tool: .toolName, rule: .rul
 jq -r 'select(.logged_at > "2026-04-01") | .tool_input.command // .tool_input.file_path // "n/a"' ~/.claude/permission-requests.log
 ```
 
-## Categorization Framework
+After triage, hand the log path to `/fewer-permission-prompts` for ranked allowlist suggestions, then return here for the wrapping + consolidation steps below.
 
-### Safe to Auto-Allow
+## Constraining Read/Write-Dual Tools
 
-Read-only operations that cannot escape to arbitrary execution. Add to `userSettings` (global) or project `localSettings`.
+Commands with read/write dual nature (`gh`, `kubectl`, `gsutil`, `docker`, `aws`, …) are the most lucrative source of prompt reduction — but the full tool is unsafe to allowlist. Pick one of two strategies depending on the surface area:
 
-- Version checks: `<tool> --version`, `<tool> version`
-- Directory listing: `ls`, `find ... -name`, `tree`
-- File inspection: `wc -l`, `du -sh`, `file`, `stat`
-- Git read-only: `git log`, `git status`, `git diff`, `git branch`, `git show`
-- Build tool read: `moon run <pkg>:typecheck`, `moon run <pkg>:lint`
-- Package manager info: `pnpm list`, `npm ls`
+### Strategy 1 — `/shim` (preferred default for multi-subcommand tools)
 
-**Settings.json rule pattern:**
-```json
-{ "toolName": "Bash", "ruleContent": "git log*" }
-```
+The `shim` skill in this same plugin installs PATH-based shims under `~/.claude/shims/` that route safe subcommands to the real binary and rebuff unsafe ones to a `<tool>-real` escape hatch. Scoped to Claude sessions only via `CLAUDE_CODE_EXECPATH`, so the user's interactive terminal is unaffected. Zero CLAUDE.md guidance needed — the rebuff message itself carries the routing instruction.
 
-### Needs Wrapping
+| Tool | Default safe ops shipped by `/shim` | Migration |
+|------|-------------------------------------|-----------|
+| `gh` | `pr view/list/diff/checks/status`, `issue view/list/status`, `run view/list`, `workflow view/list`, `repo view`, `release view/list`, `auth status` | `/shim add gh` then drop any `Bash(gh ...:*)` per-subcommand rules from `permissions.allow` |
+| `kubectl` | `get`, `describe`, `top`, `logs`*, `version`, `cluster-info`, `api-resources`, `api-versions`, `config view/get-contexts/current-context`, `explain` | `/shim add kubectl` then drop `Bash(kubectl ...:*)` rules |
+| `gsutil` | `ls`, `cat`, `stat`, `du`, `hash`, `version` | `/shim add gsutil` then drop `Bash(gsutil ...:*)` rules |
+| `docker` | `ps`, `images`, `inspect`, `logs`, `version`, `info`, `history`, `network ls/inspect`, `volume ls/inspect` | `/shim add docker` then drop `Bash(docker exec:*)` and other rules. **`docker exec` is intentionally NOT in defaults** — runs arbitrary commands inside containers. |
+| `aws` | (not shipped — too varied) | `/shim add aws` then hand-edit `~/.claude/shims/_config/aws.json` to add per-service safe lists |
+| `gcloud` | (not shipped) | same as aws |
+| `curl` | (intentionally not shipped) | not a fit — `-o`/redirects/data flags are easy to misuse. Use a per-URL bash wrapper instead. |
 
-Commands with a read/write dual nature. The full tool is risky; a wrapper restricting to safe subcommands makes it auto-allowable.
+*`kubectl logs` added when migrating from `Bash(kubectl logs:*)` to the shim default.
 
-| Tool | Unsafe operations | Safe wrapper allows |
-|------|------------------|---------------------|
-| `gh` | `pr create`, `issue create`, `pr merge`, comments | `pr list`, `pr view`, `issue list`, `issue view`, `run list`, `run view`, `release list` |
-| `aws` | `put-*`, `create-*`, `delete-*` | `describe-*`, `list-*`, `get-*` |
-| `curl` | POST/PUT/DELETE, piping to shell | GET-only with explicit URL allowlist |
+After `/shim add <tool>`: the **single** rule `Bash(<tool>:*)` becomes safe by construction (shim enforces). Drop all `Bash(<tool> sub:*)` rules — they're superseded.
 
-**Wrapper pattern** (`~/.claude/bin/gh-safe`):
+### Strategy 2 — Bash wrapper (still useful for narrow cases)
+
+A standalone bash script at `~/.claude/bin/<tool>-safe` that wraps a single tool or a narrow operation. Reach for this when:
+
+- The "tool" is really a single op (post a PR comment, run a specific query, etc.). Example: `~/.claude/bin/gh-post-comment` — wraps one `gh api` POST with a fixed payload shape.
+- You need shell logic the shim can't express (orchestrating multiple binaries, computing args).
+- The full surface is too varied for a positional-prefix safe list (some `aws` patterns).
+
+**Wrapper pattern** (`~/.claude/bin/<tool>-safe`):
 ```bash
 #!/bin/bash
-# Read-only gh operations only
+# Restrict to a known-safe op set, exec the real tool, deny everything else.
 case "$1 $2" in
-  "pr list"|"pr view"|"issue list"|"issue view"|"run list"|"run view"|"release list")
-    exec gh "$@" ;;
+  "narrow op 1"|"narrow op 2")
+    exec <real-tool> "$@" ;;
   *)
-    echo "gh-safe: '$*' not permitted. Use gh directly for write operations." >&2
+    echo "<tool>-safe: '$*' not permitted." >&2
     exit 1 ;;
 esac
 ```
 
-Then in settings.json:
-```json
-{ "toolName": "Bash", "ruleContent": "~/.claude/bin/gh-safe *" }
-```
+Then allowlist `Bash(~/.claude/bin/<tool>-safe:*)` in settings.json.
 
-And in CLAUDE.md:
-```
-For read-only GitHub operations, prefer `~/.claude/bin/gh-safe` over `gh` directly.
-```
+**Do NOT add CLAUDE.md guidance** of the form "prefer `<tool>-safe` over `<tool>`". That's context rot — every new Claude session pays the token cost to learn the rule, and the agent often forgets it under pressure. If the tool needs gating, shim it (Strategy 1) so the gating is structural, not cultural.
 
-### Never Auto-Allow
+### Migration: bash wrapper → shim
 
-Commands that allow arbitrary execution or shell escape — always require explicit approval:
+If the log surfaces an existing `Bash(~/.claude/bin/<tool>-safe:*)` rule plus the wrapper script in `~/.claude/bin/`, that's a migration candidate:
+
+1. Run `/shim add <tool>` (uses defaults if shipped, otherwise empty safe list).
+2. If the existing wrapper's allowed ops are broader than the shim defaults, edit `~/.claude/shims/_config/<tool>.json` to add them.
+3. Remove `Bash(~/.claude/bin/<tool>-safe:*)` from `permissions.allow`.
+4. Move (don't delete) the wrapper to `~/.claude/bin/<tool>-safe.removed.<TS>` so it's recoverable.
+5. Remove any CLAUDE.md paragraphs referencing the wrapper.
+
+Result: same safety surface, fewer rules, no CLAUDE.md context rot, and the user retains full unfettered access in their interactive terminal.
+
+## Never Wrap, Never Allowlist
+
+Commands that allow arbitrary execution or shell escape — always require explicit approval, no wrapper can make them safe:
 - `python3 -c`, `node -e`, `ruby -e` — inline arbitrary code
 - `eval`, `bash -c`, `sh -c` — shell injection surface
 - `curl <url> | bash` or `curl <url> | sh` — remote execution
 - `sudo <anything>` — privilege escalation
 - `rm`, `rmdir`, `truncate`, `dd` — destructive file ops
 
-## Output Format
+`/fewer-permission-prompts` has a more exhaustive list (interpreters, package runners, task-runner wildcards). Defer to it.
 
-Produce a structured report after analysis:
+## Settings Consolidation Audit
 
-```
-## Safe to Add to settings.json (userSettings)
-- Bash: `git log*`
-- Bash: `git status`
-- Bash: `git diff*`
-- Bash: `wc -l*`
-
-## Wrappers to Create
-- gh → ~/.claude/bin/gh-safe
-  Allow list: pr list, pr view, issue list, issue view, run list, run view
-  Settings rule: `~/.claude/bin/gh-safe *`
-
-## Keep Blocked (always require approval)
-- node -e (arbitrary execution)
-- python3 -c (arbitrary execution)
-- curl ... | bash (remote execution)
-```
-
-## Auditing Existing Settings for Consolidation
+`/fewer-permission-prompts` only adds rules — it never reviews what's already there. This section is unique to this skill.
 
 ### Settings File Locations
 
@@ -220,10 +235,10 @@ For each group of rules sharing a command prefix:
 
 **Safe to consolidate to `cmd:*`** — when all subcommands of the tool are benign:
 - `tmux capture-pane:*` + `tmux list-panes:*` → `Bash(tmux:*)`
-- `docker ps:*` + `docker inspect:*` + `docker logs:*` → `Bash(docker inspect:*)`, `Bash(docker logs:*)`, `Bash(docker ps:*)` (keep `docker exec` separate — it runs arbitrary commands in containers)
+- `docker ps:*` + `docker inspect:*` + `docker logs:*` — keep separate from `docker exec` (runs arbitrary commands in containers)
 
 **Safe to consolidate with a shared prefix** — when a sub-namespace is uniformly safe:
-- `gh pr view:*` + `gh pr list:*` + `gh pr diff:*` → `Bash(gh pr view:*)`, `Bash(gh pr list:*)`, `Bash(gh pr diff:*)` **or** a `gh-safe` wrapper (see above)
+- `gh pr view:*` + `gh pr list:*` + `gh pr diff:*` → either keep enumerated or use a `gh-safe` wrapper (see above)
 
 **Do not consolidate** — when the absent subcommands are intentionally blocked:
 - `git log`, `git status`, etc. — `git push`, `git reset --hard` are intentionally absent
@@ -257,3 +272,5 @@ The log grows unbounded. Clear it periodically:
 cp ~/.claude/permission-requests.log ~/.claude/permission-requests.$(date +%Y%m%d).log
 > ~/.claude/permission-requests.log
 ```
+
+Run `/fewer-permission-prompts` against the archive before deleting if you want a final allowlist sweep from that window.
