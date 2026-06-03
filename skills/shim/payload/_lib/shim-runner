@@ -30,6 +30,13 @@ if [ -z "$REAL" ] || [ ! -x "$REAL" ]; then
   exit 2
 fi
 
+# Pass-through when outside Claude Code: shims may be in PATH for snapshot reasons,
+# but interactive terminal use must be transparent. CLAUDE_CODE_EXECPATH is the
+# guard env set by Claude Code on shell spawn.
+if [ -z "${CLAUDE_CODE_EXECPATH:-}" ]; then
+  exec "$REAL" "$@"
+fi
+
 # Read global flags that consume the next argument (their value lives in the next argv slot).
 # Using a read loop instead of mapfile for bash 3.2 compatibility (macOS default).
 FLAGS_WITH_VALUE=()
