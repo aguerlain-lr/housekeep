@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# papercut — capture workflow friction as a structured wiki entry.
+# Usage: papercut add "<title>" [--what W] [--source S] [--ideal I] [--fix F]
+set -euo pipefail
+
+WIKI="${PAPERCUT_WIKI:-$HOME/.papercut/wiki.md}"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: papercut add "<title>" [--what W] [--source S] [--ideal I] [--fix F]
+
+Appends a dated, structured papercut entry to the wiki
+(default ~/.papercut/wiki.md; override with $PAPERCUT_WIKI).
+EOF
+  exit 2
+}
+
+cmd="${1:-}"
+[ "$cmd" = "add" ] || usage
+shift
+
+title="${1:-}"
+[ -n "$title" ] || usage
+shift
+
+what="" source="" ideal="" fix=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --what)   what="${2:-}";   shift 2 ;;
+    --source) source="${2:-}"; shift 2 ;;
+    --ideal)  ideal="${2:-}";  shift 2 ;;
+    --fix)    fix="${2:-}";    shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+# Ensure the wiki exists with a header.
+if [ ! -f "$WIKI" ]; then
+  mkdir -p "$(dirname "$WIKI")"
+  printf '# Papercut Wiki\n' > "$WIKI"
+fi
+
+date_stamp="$(date +%Y-%m-%d)"
+
+{
+  printf '\n## [%s] %s\n\n' "$date_stamp" "$title"
+  printf '**What happened:** %s\n' "$what"
+  printf '**Source:** %s\n' "$source"
+  printf '**Ideal behavior:** %s\n' "$ideal"
+  printf '**Fix area:** %s\n' "$fix"
+} >> "$WIKI"
+
+printf 'Logged: %s\n' "$title"
