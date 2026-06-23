@@ -11,32 +11,45 @@ Capture workflow friction mid-conversation. Append structured entry to `~/.paper
 
 ## Process
 
-1. Identify the annoyance from args or conversation context
-2. Append entry to `~/.papercut/wiki.md` (create file if missing)
-3. Confirm: "Logged: [short title]"
+1. Identify the annoyance from the args or conversation context, and derive the
+   four fields: what happened, source (skill/config/tool), ideal behavior, fix area.
+2. Run the CLI **once** (it stamps the date and creates the wiki if missing):
 
-Do not interrupt the conversation further. One-liner confirmation only.
+   ```bash
+   "${CLAUDE_PLUGIN_ROOT}/skills/papercut/scripts/papercut" add "<short title>" \
+     --what "<specific annoying behavior>" \
+     --source "<skill name, config, or tool>" \
+     --ideal "<what should happen instead>" \
+     --fix "<where to change it>"
+   ```
 
-## Entry Format
+   If `CLAUDE_PLUGIN_ROOT` is unset, fall back to
+   `~/dev/housekeep/skills/papercut/scripts/papercut`.
+3. Confirm with the one-liner the CLI prints: `Logged: <short title>`.
+
+Do not Read or hand-edit the wiki — the CLI owns the format and the date. One
+Bash call, then the confirmation. Nothing else.
+
+## Entry Format (reference — produced by the CLI)
 
 ```markdown
-## [YYYY-MM-DD] [Short title]
+## [YYYY-MM-DD] <short title>
 
-**What happened:** [specific annoying behavior]
-**Source:** [skill name, config, or tool — e.g. `my-plan-skill`]
-**Ideal behavior:** [what should happen instead]
-**Fix area:** [where to change it]
+**What happened:** <specific annoying behavior>
+**Source:** <skill name, config, or tool — e.g. `my-plan-skill`>
+**Ideal behavior:** <what should happen instead>
+**Fix area:** <where to change it>
 ```
 
 ## Example
 
 `/papercut planning skills insist on committing spec/plan files`
 
-```markdown
-## [2026-04-28] planning skills: stop committing spec/plan files
-
-**What happened:** executing-plans and writing-plans insist on committing spec files to git.
-**Source:** executing-plans, writing-plans
-**Ideal behavior:** Spec/plan files stay local/ephemeral — never committed.
-**Fix area:** skills/executing-plans/SKILL.md, skills/writing-plans/SKILL.md
+```bash
+"${CLAUDE_PLUGIN_ROOT}/skills/papercut/scripts/papercut" add \
+  "planning skills: stop committing spec/plan files" \
+  --what "executing-plans and writing-plans insist on committing spec files to git." \
+  --source "executing-plans, writing-plans" \
+  --ideal "Spec/plan files stay local/ephemeral — never committed." \
+  --fix "skills/executing-plans/SKILL.md, skills/writing-plans/SKILL.md"
 ```
