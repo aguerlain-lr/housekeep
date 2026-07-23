@@ -1,0 +1,9 @@
+{
+  "tool": "python",
+  "binaries": ["/usr/bin/python3"],
+  "default": "abstain",
+  "rewrite": [
+    { "argv": { "contains": ["-c"] }, "to": "jail-python", "reason": "inline python code auto-boxed (no network, repo read-only)" },
+    { "argv": { "scratchScript": true }, "to": "jail-python", "reason": "scratch python script auto-boxed (no network, repo read-only)" }
+  ]
+}

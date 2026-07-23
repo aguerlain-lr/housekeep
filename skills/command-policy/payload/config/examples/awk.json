@@ -1,0 +1,8 @@
+{
+  "tool": "awk",
+  "binaries": [],
+  "default": "abstain",
+  "rewrite": [
+    { "argv": { "notContains": ["-f"] }, "to": "jail-awk", "reason": "inline awk program auto-boxed (no network, repo read-only)" }
+  ]
+}

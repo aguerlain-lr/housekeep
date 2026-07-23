@@ -1,0 +1,21 @@
+{
+  "tool": "git",
+  "binaries": ["/usr/bin/git"],
+  "default": "allow",
+  "ask": [
+    { "argv": { "contains": ["--force"] }, "reason": "command-policy: git --force rewrites history — approve?" },
+    { "argv": { "contains": ["--force-with-lease"] }, "reason": "command-policy: git --force-with-lease rewrites remote history — approve?" },
+    { "argv": { "contains": ["--mirror"] }, "reason": "command-policy: git --mirror push overwrites all remote refs — approve?" },
+    { "argv": { "contains": ["reset", "--hard"] }, "reason": "command-policy: git reset --hard discards working-tree changes — approve?" },
+    { "argv": { "regex": "(^|\\s)clean\\b(.*\\s)?-[A-Za-z]*f" }, "reason": "command-policy: git clean -f deletes untracked files — approve?" },
+    { "argv": { "contains": ["branch", "-D"] }, "reason": "command-policy: git branch -D force-deletes a branch — approve?" },
+    { "argv": { "contains": ["push", "--delete"] }, "reason": "command-policy: git push --delete removes a remote ref — approve?" },
+    { "argv": { "regex": "(^|\\s)push\\s+\\S+\\s+:\\S" }, "reason": "command-policy: git push <remote> :ref deletes a remote branch — approve?" },
+    { "argv": { "contains": ["filter-branch"] }, "reason": "command-policy: git filter-branch rewrites history — approve?" },
+    { "argv": { "contains": ["reflog", "delete"] }, "reason": "command-policy: git reflog delete removes recovery history — approve?" },
+    { "argv": { "contains": ["reflog", "expire"] }, "reason": "command-policy: git reflog expire removes recovery history — approve?" },
+    { "argv": { "contains": ["update-ref", "-d"] }, "reason": "command-policy: git update-ref -d deletes a ref — approve?" }
+  ],
+  "deny": [],
+  "allow": []
+}

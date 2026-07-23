@@ -1,0 +1,12 @@
+{
+  "tool": "node",
+  "binaries": [],
+  "default": "abstain",
+  "rewrite": [
+    { "argv": { "contains": ["-e"] }, "to": "jail-node", "reason": "inline node code auto-boxed (no network, repo read-only)" },
+    { "argv": { "contains": ["-p"] }, "to": "jail-node", "reason": "inline node code auto-boxed (no network, repo read-only)" },
+    { "argv": { "contains": ["--eval"] }, "to": "jail-node", "reason": "inline node code auto-boxed (no network, repo read-only)" },
+    { "argv": { "contains": ["--print"] }, "to": "jail-node", "reason": "inline node code auto-boxed (no network, repo read-only)" },
+    { "argv": { "scratchScript": true }, "to": "jail-node", "reason": "scratch node script auto-boxed (no network, repo read-only)" }
+  ]
+}

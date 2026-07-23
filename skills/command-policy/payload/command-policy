@@ -1,0 +1,333 @@
+#!/usr/bin/env node
+// housekeep command-policy — PreToolUse/Bash hook engine.
+//
+// Reads the PreToolUse hook payload on stdin, extracts the Bash command, splits it
+// into segments, resolves each segment's binary to its real on-disk path, and
+// evaluates per-tool JSON policy (deny -> ask -> rewrite -> allow -> default).
+// Emits a PreToolUse permissionDecision. Verdict precedence across segments:
+// deny > ask > rewrite > allow. Anything it cannot confidently parse fails CLOSED
+// to `ask`.
+//
+// Config: <script-dir>/config/<tool>.json (installed at
+// ${CLAUDE_CONFIG_DIR:-~/.claude}/command-policy/config/). Schema:
+//   { "tool": "git", "binaries": ["/usr/bin/git"], "default": "allow",
+//     "deny":    [ {"argv": <matcher>, "reason": "" } ],
+//     "ask":     [ ... ],
+//     "rewrite": [ {"argv": <matcher>, "to": "jail-python", "reason": "" } ],
+//     "allow":   [ ... ] }
+// Matchers (against argv AFTER argv[0]); a matcher object may carry MULTIPLE keys,
+// ALL of which must hold (AND); at least one key is required:
+//   contains:      every listed token present as an argv token (any position)
+//   notContains:   none of the listed tokens present
+//   prefix:        leading argv tokens deep-equal the list
+//   exact:         full argv deep-equals the list
+//   regex:         space-joined argv matches the JS RegExp string
+//   scratchScript: (bool) a positional (non-"-") arg resolves to a path under a
+//                  scratch root (/tmp, /private/tmp, /var/folders, $TMPDIR)
+//
+// The `rewrite` bucket transparently swaps a segment's command word for `to`
+// (a boxed wrapper, e.g. jail-python) and emits allow + hookSpecificOutput.
+// updatedInput so the boxed command runs with no prompt. Rewrite fires only when
+// EVERY segment is managed (never greenlights unmanaged parts of a compound).
+
+'use strict';
+const fs = require('fs');
+const path = require('path');
+
+const SELF_DIR = __dirname;
+const CONFIG_DIR = process.env.COMMAND_POLICY_CONFIG_DIR || path.join(SELF_DIR, 'config');
+const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || '', '.claude');
+// Dirs to exclude from PATH resolution so we find the REAL binary, not a shim.
+const SHIM_DIRS = [
+  path.join(process.env.HOME || '', '.claude', 'shims'), // legacy shim dir (may not exist post-retirement) — still stripped defensively
+  path.join(CLAUDE_CONFIG_DIR, 'command-policy'),
+];
+// Scratch roots for scratchScript detection (agent-authored throwaway scripts).
+const SCRATCH_ROOTS = ['/tmp/', '/private/tmp/', '/var/folders/', '/private/var/folders/']
+  .concat(process.env.TMPDIR ? [process.env.TMPDIR.replace(/\/?$/, '/')] : []);
+
+// ---- IO -------------------------------------------------------------------
+
+function readStdin() {
+  try {
+    return fs.readFileSync(0, 'utf8');
+  } catch (_) {
+    return '';
+  }
+}
+
+// Abstain: exit 0 with no output -> control falls through to the normal
+// permission-rule evaluation unchanged. Used for unmanaged commands and for
+// compound commands that mix managed-safe with unmanaged segments (so we never
+// emit a blanket allow that would greenlight the unmanaged parts too).
+function abstain() {
+  process.exit(0);
+}
+
+// Emit a PreToolUse decision. NOTE (per Claude Code semantics): a hook
+// "ask"/"deny" is only effective when no permissions.allow entry matches the
+// command; a matching allow entry wins. Therefore git is fully hook-owned — no
+// overlapping git allow entry may exist. A hook "allow" skips the prompt only
+// when no deny/ask rule matches. `updatedInput`, when provided, replaces the
+// tool input (used to transparently rewrite the command word to a boxed wrapper).
+function emit(decision, reason, updatedInput) {
+  const out = {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: decision,             // "allow" | "ask" | "deny"
+      permissionDecisionReason: reason || '',
+    },
+  };
+  if (updatedInput) out.hookSpecificOutput.updatedInput = updatedInput;
+  process.stdout.write(JSON.stringify(out));
+  process.exit(0);
+}
+
+// ---- Parsing --------------------------------------------------------------
+
+// Tokenize a Bash string into segments (split on top-level | && || ; &) while
+// respecting single/double quotes and backslash escapes. Each token is
+// { v: value, s: startOffset, e: endOffset } where [s,e) is the token's byte
+// range in the original command (including any quotes) — used to splice the
+// command word during rewrite. Returns { segments: [[tok,...], ...], unparseable }.
+// Sets unparseable on command/process substitution, backticks, or unbalanced quotes.
+function parse(command) {
+  const segments = [];
+  let cur = [];
+  let tok = '';
+  let hasTok = false;
+  let tokStart = -1;
+  let unparseable = false;
+  let i = 0;
+  const n = command.length;
+
+  const start = (pos) => { if (!hasTok) tokStart = pos; };
+  const pushTok = () => { if (hasTok) { cur.push({ v: tok, s: tokStart, e: i }); tok = ''; hasTok = false; tokStart = -1; } };
+  const pushSeg = () => { pushTok(); if (cur.length) segments.push(cur); cur = []; };
+
+  while (i < n) {
+    const c = command[i];
+
+    // Command / process substitution + backticks -> opaque, fail closed.
+    if (c === '`') { unparseable = true; break; }
+    if (c === '$' && command[i + 1] === '(') { unparseable = true; break; }
+    if ((c === '<' || c === '>') && command[i + 1] === '(') { unparseable = true; break; }
+
+    if (c === '\\') { // escape next char literally
+      if (i + 1 < n) { start(i); tok += command[i + 1]; hasTok = true; i += 2; continue; }
+      i++; continue;
+    }
+    if (c === "'") { // single-quoted: literal until next '
+      const end = command.indexOf("'", i + 1);
+      if (end === -1) { unparseable = true; break; }
+      start(i); tok += command.slice(i + 1, end); hasTok = true; i = end + 1; continue;
+    }
+    if (c === '"') { // double-quoted: honor \ escapes, until next "
+      let j = i + 1; let s = '';
+      while (j < n && command[j] !== '"') {
+        if (command[j] === '\\' && j + 1 < n) { s += command[j + 1]; j += 2; }
+        else { s += command[j]; j++; }
+      }
+      if (j >= n) { unparseable = true; break; }
+      start(i); tok += s; hasTok = true; i = j + 1; continue;
+    }
+
+    // Operators (outside quotes) -> segment boundaries.
+    if (c === '|' || c === '&') {
+      pushSeg();
+      i += (command[i + 1] === c) ? 2 : 1; // || &&  vs  | &
+      continue;
+    }
+    if (c === ';') { pushSeg(); i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { pushTok(); i++; continue; }
+
+    start(i); tok += c; hasTok = true; i++;
+  }
+  if (!unparseable) pushSeg();
+  return { segments, unparseable };
+}
+
+// Drop leading VAR=val environment assignments. Returns argv (argv[0] = command)
+// as token objects.
+function stripEnv(tokens) {
+  let k = 0;
+  while (k < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[k].v)) k++;
+  return tokens.slice(k);
+}
+
+// ---- Resolution -----------------------------------------------------------
+
+function realpathSafe(p) {
+  try { return fs.realpathSync(p); } catch (_) { return p; }
+}
+
+function resolveBinary(arg0) {
+  if (arg0.includes('/')) return realpathSafe(arg0);
+  const parts = (process.env.PATH || '').split(':').filter(Boolean)
+    .filter((d) => !SHIM_DIRS.includes(d));
+  for (const dir of parts) {
+    const cand = path.join(dir, arg0);
+    try { fs.accessSync(cand, fs.constants.X_OK); return realpathSafe(cand); } catch (_) {}
+  }
+  return arg0; // unresolved; fall back to bare name
+}
+
+// ---- Config + matching ----------------------------------------------------
+
+function loadConfigs() {
+  const byTool = {};
+  const byBinary = {};
+  let files = [];
+  try { files = fs.readdirSync(CONFIG_DIR).filter((f) => f.endsWith('.json')); } catch (_) {}
+  for (const f of files) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(CONFIG_DIR, f), 'utf8'));
+      if (cfg.tool) byTool[cfg.tool] = cfg;
+      for (const b of cfg.binaries || []) byBinary[realpathSafe(b)] = cfg;
+    } catch (_) {}
+  }
+  return { byTool, byBinary };
+}
+
+function configFor(realPath, arg0, cfgs) {
+  if (cfgs.byBinary[realPath]) return cfgs.byBinary[realPath];
+  const base = path.basename(realPath || arg0);
+  if (cfgs.byTool[base]) return cfgs.byTool[base];
+  const base0 = path.basename(arg0);
+  if (cfgs.byTool[base0]) return cfgs.byTool[base0];
+  return null;
+}
+
+// Does any positional (non-flag) arg resolve to a path under a scratch root?
+function isScratchScript(args) {
+  for (const a of args) {
+    if (!a || a.startsWith('-')) continue;
+    let p = a;
+    if (!p.startsWith('/')) { try { p = path.resolve(p); } catch (_) { continue; } }
+    for (const r of SCRATCH_ROOTS) { if (p.startsWith(r)) return true; }
+  }
+  return false;
+}
+
+// A matcher object may carry multiple keys; ALL present keys must hold (AND).
+// At least one key is required (an empty matcher never matches).
+function matches(rule, args) {
+  const a = rule.argv || {};
+  let any = false;
+  if ('contains' in a) { any = true; if (!a.contains.every((t) => args.includes(t))) return false; }
+  if ('notContains' in a) { any = true; if (a.notContains.some((t) => args.includes(t))) return false; }
+  if ('prefix' in a) { any = true; if (!(a.prefix.length <= args.length && a.prefix.every((t, i) => args[i] === t))) return false; }
+  if ('exact' in a) { any = true; if (!(a.exact.length === args.length && a.exact.every((t, i) => args[i] === t))) return false; }
+  if ('regex' in a) { any = true; try { if (!new RegExp(a.regex).test(args.join(' '))) return false; } catch (_) { return false; } }
+  if ('scratchScript' in a) { any = true; if (a.scratchScript && !isScratchScript(args)) return false; }
+  return any;
+}
+
+// Evaluate one config against args -> { decision, reason, to? }. `default` may be
+// "allow" (git-style: allow-by-default) or "abstain" (interpreter-style:
+// non-matching invocations fall through to the normal permission flow untouched).
+function evaluate(cfg, args) {
+  for (const rule of cfg.deny || []) if (matches(rule, args)) return { decision: 'deny', reason: rule.reason || '' };
+  for (const rule of cfg.ask || []) if (matches(rule, args)) return { decision: 'ask', reason: rule.reason || '' };
+  for (const rule of cfg.rewrite || []) if (matches(rule, args)) return { decision: 'rewrite', reason: rule.reason || '', to: rule.to };
+  for (const rule of cfg.allow || []) if (matches(rule, args)) return { decision: 'allow', reason: rule.reason || '' };
+  return { decision: cfg.default || 'allow', reason: '' };
+}
+
+// ---- Main -----------------------------------------------------------------
+
+function main() {
+  let payload;
+  try { payload = JSON.parse(readStdin()); } catch (_) { process.exit(0); }
+  if (!payload || payload.tool_name !== 'Bash') process.exit(0);
+  const command = payload.tool_input && payload.tool_input.command;
+  if (!command || typeof command !== 'string') process.exit(0);
+
+  const { segments, unparseable } = parse(command);
+  const cfgs = loadConfigs();
+
+  // Word-boundary scan for a managed tool name in the raw command — used to scope
+  // fail-closed behavior on unparseable input to commands that plausibly involve a
+  // managed tool (so benign `x=$(date)` is not gated).
+  const managedNames = new Set(Object.keys(cfgs.byTool));
+  const mentionsManaged = () => {
+    for (const name of managedNames) {
+      if (new RegExp(`\\b${name}\\b`).test(command)) return true;
+    }
+    return false;
+  };
+
+  // Worst decision tracked over {allow, ask, deny} only; rewrite is an
+  // allow-level transform tracked separately as splices.
+  const RANK = { allow: 0, ask: 1, deny: 2 };
+  let worst = { decision: 'allow', reason: '' };
+  const bump = (v) => { if (RANK[v.decision] > RANK[worst.decision]) worst = v; };
+
+  const rewrites = [];   // { s, e, to } splices into the original command
+  let managedCount = 0;
+  let unmanagedCount = 0;
+
+  for (const seg of segments) {
+    const argv = stripEnv(seg);
+    if (!argv.length) continue;
+    const values = argv.map((t) => t.v);
+
+    // A leading `sh -c` / `bash -c` / `zsh -c` "STRING" hides an opaque inner
+    // command. Treat as managed+ask only if the raw command mentions a managed
+    // tool; otherwise it's an unmanaged shell invocation.
+    const base0 = path.basename(values[0]);
+    if (['sh', 'bash', 'zsh'].includes(base0) && values.includes('-c')) {
+      if (mentionsManaged()) { managedCount++; bump({ decision: 'ask', reason: `command-policy: '${base0} -c' runs an opaque inner command mentioning a gated tool — approve to run.` }); }
+      else unmanagedCount++;
+      continue;
+    }
+
+    const real = resolveBinary(values[0]);
+    const cfg = configFor(real, values[0], cfgs);
+    if (!cfg) { unmanagedCount++; continue; }
+
+    const v = evaluate(cfg, values.slice(1));
+    // abstain: a managed tool whose specific invocation isn't governed -> treat as
+    // pass-through so the normal permission flow handles it (never blanket-allowed).
+    if (v.decision === 'abstain') { unmanagedCount++; continue; }
+
+    managedCount++;
+    if (v.decision === 'rewrite' && v.to) {
+      rewrites.push({ s: argv[0].s, e: argv[0].e, to: v.to });
+      continue;
+    }
+    if (v.decision !== 'allow' && !v.reason) {
+      v.reason = `command-policy: '${cfg.tool} ${values.slice(1).join(' ')}' requires approval.`;
+    }
+    bump(v);
+  }
+
+  // Unparseable input: fail closed to ask ONLY if a managed tool is mentioned.
+  if (unparseable && mentionsManaged()) {
+    bump({ decision: 'ask', reason: 'command-policy: command not statically parseable (command substitution / unbalanced quotes) and mentions a gated tool — approve to run.' });
+    managedCount++;
+  }
+
+  // Decision:
+  //  - ask/deny -> emit (effective because gated tools have no overlapping allow).
+  //  - rewrite  -> only when EVERY segment is managed (never greenlight unmanaged
+  //               parts of a compound). Splice command words -> emit allow +
+  //               updatedInput so the boxed command runs with no prompt.
+  //  - allow    -> emit explicit allow ONLY when every segment is managed-safe.
+  //  - else     -> abstain (normal permission flow).
+  if (worst.decision === 'ask' || worst.decision === 'deny') return emit(worst.decision, worst.reason);
+
+  if (rewrites.length && unmanagedCount === 0) {
+    // Apply splices right-to-left so earlier offsets stay valid.
+    rewrites.sort((a, b) => b.s - a.s);
+    let cmd = command;
+    for (const r of rewrites) cmd = cmd.slice(0, r.s) + r.to + cmd.slice(r.e);
+    const updatedInput = Object.assign({}, payload.tool_input, { command: cmd });
+    return emit('allow', 'command-policy: interpreter inline/scratch code auto-boxed (no network, repo read-only).', updatedInput);
+  }
+
+  if (managedCount >= 1 && unmanagedCount === 0) return emit('allow', '');
+  return abstain();
+}
+
+main();

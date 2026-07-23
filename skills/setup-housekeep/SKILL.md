@@ -104,16 +104,17 @@ package manager installed it) — direct path, no shim.
 
 ## Step 3 — Copy the MCP server payload
 
-Destination: `~/.claude/mcp-servers/local-search/`.
+Destination: `$CONFIG_DIR/mcp-servers/local-search/`.
 
 ```
-mkdir -p ~/.claude/mcp-servers/local-search
-cp <skill-root>/payload/mcp/auth.mjs       ~/.claude/mcp-servers/local-search/
-cp <skill-root>/payload/mcp/index.mjs      ~/.claude/mcp-servers/local-search/
-cp <skill-root>/payload/mcp/hook.mjs       ~/.claude/mcp-servers/local-search/
-cp <skill-root>/payload/mcp/test.mjs       ~/.claude/mcp-servers/local-search/
-cp <skill-root>/payload/mcp/package.json   ~/.claude/mcp-servers/local-search/
-cp <skill-root>/payload/mcp/README.md      ~/.claude/mcp-servers/local-search/
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+mkdir -p "$CONFIG_DIR/mcp-servers/local-search"
+cp <skill-root>/payload/mcp/auth.mjs       "$CONFIG_DIR/mcp-servers/local-search/"
+cp <skill-root>/payload/mcp/index.mjs      "$CONFIG_DIR/mcp-servers/local-search/"
+cp <skill-root>/payload/mcp/hook.mjs       "$CONFIG_DIR/mcp-servers/local-search/"
+cp <skill-root>/payload/mcp/test.mjs       "$CONFIG_DIR/mcp-servers/local-search/"
+cp <skill-root>/payload/mcp/package.json   "$CONFIG_DIR/mcp-servers/local-search/"
+cp <skill-root>/payload/mcp/README.md      "$CONFIG_DIR/mcp-servers/local-search/"
 ```
 
 Overwriting is intentional — re-running picks up upstream updates.
@@ -126,7 +127,8 @@ The MCP server depends on `@modelcontextprotocol/sdk` + `zod`. Run inside
 the install directory:
 
 ```
-npm install --prefix ~/.claude/mcp-servers/local-search --no-fund --no-audit
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+npm install --prefix "$CONFIG_DIR/mcp-servers/local-search" --no-fund --no-audit
 ```
 
 (Use `npm --prefix <dir>` instead of `cd && npm`. Avoids cd-in-compound
@@ -137,45 +139,55 @@ issues and is safe to re-run.)
 ## Step 5 — Install the CLI helper
 
 ```
-mkdir -p ~/.claude/bin
-cp <skill-root>/payload/bin/local-search-allow ~/.claude/bin/local-search-allow
-chmod +x ~/.claude/bin/local-search-allow
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+mkdir -p "$CONFIG_DIR/bin"
+cp <skill-root>/payload/bin/local-search-allow "$CONFIG_DIR/bin/local-search-allow"
+chmod +x "$CONFIG_DIR/bin/local-search-allow"
 ```
 
 ---
 
-## Step 6 — Register the MCP server in `~/.claude.json`
+## Step 6 — Register the MCP server in `$CLAUDE_JSON` (`.claude.json`)
 
-Claude Code reads MCP server registrations from `~/.claude.json`, NOT
-`~/.claude/settings.json`. Back up first, then add atomically with jq:
+Claude Code reads MCP server registrations from `.claude.json`, NOT
+`$CONFIG_DIR/settings.json`. Note: `.claude.json` lives at
+`$HOME/.claude.json` by default (a symlink into the config dir) but at
+`$CLAUDE_CONFIG_DIR/.claude.json` when the config dir is relocated — hence
+the separate `$CLAUDE_JSON` resolution below, distinct from the
+`$CONFIG_DIR` used for everything else. Back up first, then add atomically
+with jq:
 
 ```
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CLAUDE_JSON="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}"   # set-case: jail path
+: "${CLAUDE_JSON:=$HOME/.claude.json}"                                # unset-case: original host path (symlink)
 TS=$(date +%Y%m%d-%H%M%S)
-[ -f ~/.claude.json ] || echo '{}' > ~/.claude.json
-cp ~/.claude.json ~/.claude.json.bak.$TS
+[ -f "$CLAUDE_JSON" ] || echo '{}' > "$CLAUDE_JSON"
+cp "$CLAUDE_JSON" "$CLAUDE_JSON.bak.$TS"
 jq '.mcpServers //= {} | .mcpServers["local-search"] = {
   "type": "stdio",
   "command": "node",
-  "args": ["'"$HOME"'/.claude/mcp-servers/local-search/index.mjs"],
+  "args": ["'"$CONFIG_DIR"'/mcp-servers/local-search/index.mjs"],
   "env": {}
-}' ~/.claude.json > /tmp/claude.new && mv /tmp/claude.new ~/.claude.json
+}' "$CLAUDE_JSON" > /tmp/claude.new && mv /tmp/claude.new "$CLAUDE_JSON"
 ```
 
 Verify:
 
 ```
-jq '.mcpServers["local-search"]' ~/.claude.json
+jq '.mcpServers["local-search"]' "$CLAUDE_JSON"
 ```
 
 ---
 
-## Step 7 — Add permissions + PreToolUse hook to `~/.claude/settings.json`
+## Step 7 — Add permissions + PreToolUse hook to `$CONFIG_DIR/settings.json`
 
 ```
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 TS=$(date +%Y%m%d-%H%M%S)
-[ -f ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
-cp ~/.claude/settings.json ~/.claude/settings.json.bak.$TS
-HOOK="node $HOME/.claude/mcp-servers/local-search/hook.mjs"
+[ -f "$CONFIG_DIR/settings.json" ] || echo '{}' > "$CONFIG_DIR/settings.json"
+cp "$CONFIG_DIR/settings.json" "$CONFIG_DIR/settings.json.bak.$TS"
+HOOK='node ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/mcp-servers/local-search/hook.mjs'
 jq --arg hook "$HOOK" '
   .permissions //= {} |
   .permissions.allow //= [] |
@@ -187,7 +199,7 @@ jq --arg hook "$HOOK" '
     "matcher": "mcp__local-search__.*",
     "hooks": [{"type":"command","command":$hook}]
   }]
-' ~/.claude/settings.json > /tmp/settings.new && mv /tmp/settings.new ~/.claude/settings.json
+' "$CONFIG_DIR/settings.json" > /tmp/settings.new && mv /tmp/settings.new "$CONFIG_DIR/settings.json"
 ```
 
 Verify:
@@ -195,7 +207,7 @@ Verify:
 ```
 jq '([.permissions.allow[] | select(test("local-search"))] | length),
     ([.hooks.PreToolUse[] | select(.matcher=="mcp__local-search__.*")] | length)' \
-  ~/.claude/settings.json
+  "$CONFIG_DIR/settings.json"
 # expect: 2  then  1
 ```
 
@@ -212,16 +224,17 @@ Ask the user:
 Default to yes if they don't object. Skip cleanly if they decline.
 
 The hook script ships in this repo at `<housekeep-root>/hooks/prefer-dedicated-tools.sh`.
-Copy it into `~/.claude/hooks/` so the path stays stable across plugin
+Copy it into `$CONFIG_DIR/hooks/` so the path stays stable across plugin
 upgrades, then register the matcher:
 
 ```
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 TS=$(date +%Y%m%d-%H%M%S)
-mkdir -p ~/.claude/hooks
-cp <housekeep-root>/hooks/prefer-dedicated-tools.sh ~/.claude/hooks/prefer-dedicated-tools.sh
-chmod +x ~/.claude/hooks/prefer-dedicated-tools.sh
-cp ~/.claude/settings.json ~/.claude/settings.json.bak.$TS
-HOOK="bash $HOME/.claude/hooks/prefer-dedicated-tools.sh"
+mkdir -p "$CONFIG_DIR/hooks"
+cp <housekeep-root>/hooks/prefer-dedicated-tools.sh "$CONFIG_DIR/hooks/prefer-dedicated-tools.sh"
+chmod +x "$CONFIG_DIR/hooks/prefer-dedicated-tools.sh"
+cp "$CONFIG_DIR/settings.json" "$CONFIG_DIR/settings.json.bak.$TS"
+HOOK='bash ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/prefer-dedicated-tools.sh'
 jq --arg hook "$HOOK" '
   .hooks //= {} |
   .hooks.PreToolUse //= [] |
@@ -232,7 +245,7 @@ jq --arg hook "$HOOK" '
     "matcher": "Bash",
     "hooks": [{"type":"command","command":$hook}]
   }]
-' ~/.claude/settings.json > /tmp/settings.new && mv /tmp/settings.new ~/.claude/settings.json
+' "$CONFIG_DIR/settings.json" > /tmp/settings.new && mv /tmp/settings.new "$CONFIG_DIR/settings.json"
 ```
 
 The dedupe filter strips any prior `prefer-dedicated-tools.sh` entry by
@@ -244,7 +257,7 @@ user hooks) are left alone.
 Verify:
 
 ```
-jq '[.hooks.PreToolUse[] | select(.matcher=="Bash" and ((.hooks // []) | any(.command | test("prefer-dedicated-tools\\.sh"))))] | length' ~/.claude/settings.json
+jq '[.hooks.PreToolUse[] | select(.matcher=="Bash" and ((.hooks // []) | any(.command | test("prefer-dedicated-tools\\.sh"))))] | length' "$CONFIG_DIR/settings.json"
 # expect: 1
 ```
 
@@ -255,15 +268,16 @@ jq '[.hooks.PreToolUse[] | select(.matcher=="Bash" and ((.hooks // []) | any(.co
 Ask the user:
 
 > Wire the `audit-permission-requests` log hook? Appends every permission
-> prompt to `~/.claude/permission-requests.log` (async, non-blocking) for
+> prompt to `$CONFIG_DIR/permission-requests.log` (async, non-blocking) for
 > later analysis by the `audit-permission-requests` skill.
 
 Default to yes if they don't object. Skip cleanly if they decline.
 
 ```
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 TS=$(date +%Y%m%d-%H%M%S)
-cp ~/.claude/settings.json ~/.claude/settings.json.bak.$TS
-LOG_CMD='jq --argjson noop 0 '"'"'. + {logged_at: (now | todate)}'"'"' >> ~/.claude/permission-requests.log'
+cp "$CONFIG_DIR/settings.json" "$CONFIG_DIR/settings.json.bak.$TS"
+LOG_CMD='jq --argjson noop 0 '"'"'. + {logged_at: (now | todate)}'"'"' >> ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/permission-requests.log'
 jq --arg cmd "$LOG_CMD" '
   .hooks //= {} |
   .hooks.PermissionRequest //= [] |
@@ -273,7 +287,7 @@ jq --arg cmd "$LOG_CMD" '
   .hooks.PermissionRequest += [{
     "hooks": [{"type":"command","command":$cmd,"async":true}]
   }]
-' ~/.claude/settings.json > /tmp/settings.new && mv /tmp/settings.new ~/.claude/settings.json
+' "$CONFIG_DIR/settings.json" > /tmp/settings.new && mv /tmp/settings.new "$CONFIG_DIR/settings.json"
 ```
 
 The dedupe filter strips any prior entry whose command writes to
@@ -284,13 +298,13 @@ alone.
 Verify:
 
 ```
-jq '[.hooks.PermissionRequest[] | select((.hooks // []) | any(.command | test("permission-requests\\.log")))] | length' ~/.claude/settings.json
+jq '[.hooks.PermissionRequest[] | select((.hooks // []) | any(.command | test("permission-requests\\.log")))] | length' "$CONFIG_DIR/settings.json"
 # expect: 1
 ```
 
 ---
 
-## Step 8 — Optional: insert guidance into `~/.claude/CLAUDE.md`
+## Step 8 — Optional: insert guidance into `$CONFIG_DIR/CLAUDE.md`
 
 Ask the user whether to add a marker-delimited usage block to the global
 CLAUDE.md. Default to yes if they don't object.
@@ -298,17 +312,18 @@ CLAUDE.md. Default to yes if they don't object.
 Idempotent insert (strip any prior block between markers, then append):
 
 ```
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 TS=$(date +%Y%m%d-%H%M%S)
-mkdir -p ~/.claude
-[ -f ~/.claude/CLAUDE.md ] || echo "# Global Claude Code Instructions" > ~/.claude/CLAUDE.md
-cp ~/.claude/CLAUDE.md ~/.claude/CLAUDE.md.bak.$TS
+mkdir -p "$CONFIG_DIR"
+[ -f "$CONFIG_DIR/CLAUDE.md" ] || echo "# Global Claude Code Instructions" > "$CONFIG_DIR/CLAUDE.md"
+cp "$CONFIG_DIR/CLAUDE.md" "$CONFIG_DIR/CLAUDE.md.bak.$TS"
 awk '
   $0 == "<!-- BEGIN housekeep-local-search -->" { skip = 1; next }
   $0 == "<!-- END housekeep-local-search -->"   { skip = 0; next }
   !skip { print }
-' ~/.claude/CLAUDE.md > /tmp/claude_md.new && mv /tmp/claude_md.new ~/.claude/CLAUDE.md
+' "$CONFIG_DIR/CLAUDE.md" > /tmp/claude_md.new && mv /tmp/claude_md.new "$CONFIG_DIR/CLAUDE.md"
 
-cat >> ~/.claude/CLAUDE.md <<'EOF'
+cat >> "$CONFIG_DIR/CLAUDE.md" <<'EOF'
 
 <!-- BEGIN housekeep-local-search -->
 ## Codebase search — `local-search` MCP
@@ -328,8 +343,8 @@ Both are read-only, sandboxed to allowed roots, and prompt for approval
 when given a path outside the project. To grant access manually:
 
 ```
-~/.claude/bin/local-search-allow once|session|always /path
-~/.claude/bin/local-search-allow list
+${CLAUDE_CONFIG_DIR:-$HOME/.claude}/bin/local-search-allow once|session|always /path
+${CLAUDE_CONFIG_DIR:-$HOME/.claude}/bin/local-search-allow list
 ```
 <!-- END housekeep-local-search -->
 EOF
@@ -340,7 +355,8 @@ EOF
 ## Step 9 — Run the test suite
 
 ```
-node ~/.claude/mcp-servers/local-search/test.mjs
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+node "$CONFIG_DIR/mcp-servers/local-search/test.mjs"
 ```
 
 Expect `29 passed, 0 failed`. If any fail, do not declare success — read
@@ -353,10 +369,11 @@ broken settings.json, etc.) before continuing.
 
 Print a short summary listing:
 
-- Files written (`~/.claude/mcp-servers/local-search/*`,
-  `~/.claude/bin/local-search-allow`).
-- Files edited (`~/.claude.json`, `~/.claude/settings.json`, and
-  `~/.claude/CLAUDE.md` if they opted in).
+- Files written (`$CONFIG_DIR/mcp-servers/local-search/*`,
+  `$CONFIG_DIR/bin/local-search-allow`), where
+  `CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"` (the active config dir).
+- Files edited (`$CLAUDE_JSON` (`.claude.json`), `$CONFIG_DIR/settings.json`,
+  and `$CONFIG_DIR/CLAUDE.md` if they opted in).
 - Backups created (`*.bak.<TS>` for each edited file).
 - Test results.
 - Next step: restart Claude Code. In a fresh session, verify with `/mcp`
@@ -381,10 +398,12 @@ idempotent:
 
 | Path | Action |
 |---|---|
-| `~/.claude/mcp-servers/local-search/` | Created (server payload) |
-| `~/.claude/bin/local-search-allow` | Created (CLI helper) |
-| `~/.claude/hooks/prefer-dedicated-tools.sh` | Optional: copied from repo for stable path across upgrades |
-| `~/.claude.json` | Adds `mcpServers["local-search"]` |
-| `~/.claude/settings.json` | Adds `permissions.allow` + `PreToolUse` (local-search permission hook); optional `PreToolUse` Bash matcher (prefer-dedicated-tools) and `PermissionRequest` (audit log) |
-| `~/.claude/CLAUDE.md` | Optional marker-delimited guidance block |
+| `$CONFIG_DIR/mcp-servers/local-search/` | Created (server payload) |
+| `$CONFIG_DIR/bin/local-search-allow` | Created (CLI helper) |
+| `$CONFIG_DIR/hooks/prefer-dedicated-tools.sh` | Optional: copied from repo for stable path across upgrades |
+| `$CLAUDE_JSON` (`.claude.json`) | Adds `mcpServers["local-search"]` |
+| `$CONFIG_DIR/settings.json` | Adds `permissions.allow` + `PreToolUse` (local-search permission hook); optional `PreToolUse` Bash matcher (prefer-dedicated-tools) and `PermissionRequest` (audit log) |
+| `$CONFIG_DIR/CLAUDE.md` | Optional marker-delimited guidance block |
+
+(`CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"` — the active config dir.)
 | `*.bak.<TS>` | Timestamped backups of every edited file |
