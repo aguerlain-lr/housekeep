@@ -49,6 +49,19 @@ Decisions (git is **fully hook-owned** — the hook emits explicit verdicts; see
 - **deny** → hard block with a redirect `reason`. Reserved for future hard-blocks
   (e.g. Phase-2 interpreter → py-jail redirect). No git rule uses `deny` in v1.
 
+### Auto-mode deferral (opt-in)
+
+By default `ask` prompts in every permission mode — including `auto`. Set the env
+var `COMMAND_POLICY_DEFER_IN_AUTO=1` (in your settings.json `env`) to make `ask`
+**advisory in `auto` mode only**: when `permission_mode` is `auto`, an `ask`
+verdict *abstains* (flows down to auto-mode's own permission handling) instead of
+interrupting — there is no human to confirm with in auto. `deny` still hard-blocks
+in every mode, and all other modes (`default`/`acceptEdits`/`plan`) are unaffected.
+Promote any op that must stay gated even in auto from `ask` → `deny`. Default (flag
+unset) preserves strict behavior. In the jail, nono still enforces at the kernel
+regardless; on bare host, command-policy is the only layer, so `auto` + this flag
+means no command gating there beyond `deny`.
+
 ### Why hook-owned (not allowlist + hook)
 
 Per Claude Code semantics, a PreToolUse hook returning `"ask"`/`"deny"` in JSON

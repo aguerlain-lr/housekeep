@@ -77,6 +77,22 @@ probe allow "managed pipe + 2>&1"         '"git log 2>&1 | head -20"'
 probe ask   "danger in head pipe"         '"git push --force | head"'
 probe abstain "grep still unmanaged"      '"git log | grep fix | head"'
 
+# auto-mode defer (opt-in COMMAND_POLICY_DEFER_IN_AUTO=1): in "auto" mode with the
+# flag, `ask` verdicts abstain (flow down to auto-mode). Without the flag, or in
+# any other mode, `ask` still prompts. `deny` always blocks (tested inline below).
+aprobe() { # <expected> <desc> <cmd-json> <mode> <flag:0|1>
+  local expected="$1" desc="$2" cmd="$3" mode="$4" flag="$5" out dec
+  out=$(printf '%s' "{\"tool_name\":\"Bash\",\"permission_mode\":\"$mode\",\"tool_input\":{\"command\":$cmd}}" | COMMAND_POLICY_DEFER_IN_AUTO="$flag" "$ENGINE")
+  if [ -z "$out" ]; then dec="abstain"; else dec=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision' 2>/dev/null); fi
+  if [ "$dec" = "$expected" ]; then printf 'PASS  %-45s %s\n' "$desc" "$dec"; else printf 'FAIL  %-45s expected=%s got=%s\n' "$desc" "$expected" "$dec"; FAIL=$((FAIL+1)); fi
+}
+aprobe abstain "auto+flag: force-push defers"    '"git push --force"'      auto    1
+aprobe abstain "auto+flag: reset --hard defers"  '"git reset --hard"'      auto    1
+aprobe abstain "auto+flag: unparseable defers"   '"x=$(git push --force)"' auto    1
+aprobe ask     "auto NO flag: still prompts"     '"git push --force"'      auto    0
+aprobe ask     "default+flag: still prompts"     '"git push --force"'      default 1
+aprobe allow   "auto+flag: safe op still allow"  '"git status"'            auto    1
+
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL DETERMINISTIC PROBES PASS"; else echo "$FAIL FAIL(s)"; fi
 echo

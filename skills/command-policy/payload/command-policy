@@ -326,13 +326,23 @@ function main() {
   }
 
   // Decision:
-  //  - ask/deny -> emit (effective because gated tools have no overlapping allow).
+  //  - deny     -> emit (hard block, every permission mode).
+  //  - ask      -> emit (effective because gated tools have no overlapping allow),
+  //               EXCEPT in "auto" permission mode with COMMAND_POLICY_DEFER_IN_AUTO
+  //               opt-in: `ask` is advisory (there is no human to confirm with in
+  //               auto), so abstain and let auto-mode's own flow decide. `deny`
+  //               still blocks — promote must-gate-in-auto ops from ask -> deny.
   //  - rewrite  -> only when EVERY segment is managed (never greenlight unmanaged
   //               parts of a compound). Splice command words -> emit allow +
   //               updatedInput so the boxed command runs with no prompt.
   //  - allow    -> emit explicit allow ONLY when every segment is managed-safe.
   //  - else     -> abstain (normal permission flow).
-  if (worst.decision === 'ask' || worst.decision === 'deny') return emit(worst.decision, worst.reason);
+  if (worst.decision === 'deny') return emit('deny', worst.reason);
+  if (worst.decision === 'ask') {
+    const deferInAuto = /^(1|true|yes|on)$/i.test(process.env.COMMAND_POLICY_DEFER_IN_AUTO || '');
+    if (deferInAuto && payload.permission_mode === 'auto') return abstain();
+    return emit('ask', worst.reason);
+  }
 
   if (rewrites.length && unmanagedCount === 0) {
     // Apply splices right-to-left so earlier offsets stay valid.
