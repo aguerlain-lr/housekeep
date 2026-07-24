@@ -99,9 +99,54 @@ jq -r 'select(.logged_at > "2026-04-01") | .tool_input.command // .tool_input.fi
 
 After triage, hand the log path to `/fewer-permission-prompts` for ranked allowlist suggestions, then return here for the command-policy/wrapping + consolidation steps below.
 
+## Prompts you can't fix from `permissions.allow`
+
+Not every prompt comes from Claude Code's permission layer. Some sources show up in the log and look identical to a settings-driven prompt — but adding `permissions.allow` rules does nothing, because the gate is elsewhere.
+
+### MCP server self-enforcement
+
+Some MCP servers run their own per-call access checks (`mcp__local-search`, custom file servers, sandboxed shell tools). The tool is in `permissions.allow` and Claude Code lets the call through, but the server itself rejects the arguments and surfaces an `isError: true` response back to Claude — which in some setups re-prompts via a `PreToolUse` hook.
+
+**Recognize from the log entry:**
+- `tool_name` starts with `mcp__`
+- `permission_suggestions: null` — Claude Code didn't generate a settings suggestion because the tool is already allowed
+- The tool already appears in `permissions.allow`
+
+**Don't** recommend adding the tool name again to `permissions.allow`. Instead, look up the MCP server's own sandbox config and widen it there.
+
+**Example — `local-search` MCP:** the sandbox is `permissions.additionalDirectories` (path-prefix match via `startsWith(root + sep)`). Widen with:
+```bash
+~/.claude/bin/local-search-allow always /Users/<you>/dev      # covers all repos under ~/dev
+~/.claude/bin/local-search-allow always /Users/<you>/.claude  # covers skill files, hooks, configs
+~/.claude/bin/local-search-allow list                          # verify current roots
+```
+Prefix-match means adding `~/dev` subsumes `~/dev/project-a`, `~/dev/project-b`, etc. — no per-repo entry needed.
+
+**General principle:** when a tool is already allowlisted but the log keeps showing prompts for it, the gate is not in `permissions.allow`. Find the tool's own sandbox layer (per-MCP-server config, hook script, wrapper) and widen there.
+
 ## Constraining Read/Write-Dual Tools
 
-Commands with read/write dual nature (`gh`, `kubectl`, `gsutil`, `docker`, `aws`, …) are the most lucrative source of prompt reduction — but the full tool is unsafe to allowlist. Pick one of two strategies depending on the surface area:
+Commands with read/write dual nature (`gh`, `kubectl`, `gsutil`, `docker`, `aws`, …) are the most lucrative source of prompt reduction — but the full tool is unsafe to allowlist. Pick one of two strategies depending on the surface area.
+
+### Pre-flight: check what's already gating the tool
+
+**Run before flagging a `Bash(<tool>:*)` rule as risk or recommending `/command-policy add`.** A broad allow rule looks naked from settings alone, but if the tool is already command-policy-gated the picture is different — and re-recommending a migration that's already done is noise.
+
+```bash
+ls "$CONFIG_DIR/command-policy/config/<tool>.json"   # policy present for this tool?
+jq -e '.hooks.PreToolUse[]?.hooks[]?.command | select(test("command-policy/command-policy"))' \
+  "$CONFIG_DIR/settings.json" >/dev/null && echo "command-policy hook registered"
+```
+
+Decision table for a `Bash(<tool>:*)` entry in `permissions.allow`:
+
+| State | Meaning | Action |
+|-------|---------|--------|
+| `<tool>.json` policy exists **and** hook registered | Tool is command-policy-gated | **Remove the broad `Bash(<tool>:*)` allow** — it overrides the hook's `ask` and lets dangerous ops through. The hook already allows the safe set silently. |
+| Policy exists, hook **not** registered | Config deployed but inactive | Register the command-policy `PreToolUse` hook (see the `command-policy` skill), then drop the broad allow. |
+| No policy for the tool | Naked allow — full surface exposed | Recommend `/command-policy add <tool>` (Strategy 1), then drop the broad allow. |
+
+This also catches the inverse: per-subcommand rules like `Bash(gh pr view:*)` + `Bash(gh pr list:*)` + … with **no** command-policy config → consolidate via `/command-policy add gh` and drop the per-subcommand rules.
 
 ### Strategy 1 — `command-policy` (preferred default for multi-subcommand / flag-sensitive tools)
 
