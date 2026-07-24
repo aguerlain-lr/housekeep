@@ -3,18 +3,27 @@
 //
 // Reads the PreToolUse hook payload on stdin, extracts the Bash command, splits it
 // into segments, resolves each segment's binary to its real on-disk path, and
-// evaluates per-tool JSON policy (deny -> ask -> rewrite -> allow -> default).
-// Emits a PreToolUse permissionDecision. Verdict precedence across segments:
-// deny > ask > rewrite > allow. Anything it cannot confidently parse fails CLOSED
-// to `ask`.
+// evaluates per-tool JSON policy (deny -> ask -> deferInAuto -> rewrite -> allow ->
+// default). Emits a PreToolUse permissionDecision. Verdict precedence across
+// segments: deny > ask > deferInAuto > allow. Anything it cannot confidently parse
+// fails CLOSED to `deferInAuto` (prompt interactively, pass through in auto).
+//
+// Verdict tiers (strongest first):
+//   deny        - hard block, every mode. Agent cannot run it.
+//   ask         - always prompt, every mode INCLUDING auto.
+//   deferInAuto - prompt in interactive modes; in "auto" mode pass through when
+//                 env COMMAND_POLICY_DEFER_IN_AUTO is set (else behaves like ask).
+//   allow       - silent.
 //
 // Config: <script-dir>/config/<tool>.json (installed at
 // ${CLAUDE_CONFIG_DIR:-~/.claude}/command-policy/config/). Schema:
-//   { "tool": "git", "binaries": ["/usr/bin/git"], "default": "allow",
-//     "deny":    [ {"argv": <matcher>, "reason": "" } ],
-//     "ask":     [ ... ],
-//     "rewrite": [ {"argv": <matcher>, "to": "jail-python", "reason": "" } ],
-//     "allow":   [ ... ] }
+//   { "tool": "git", "binaries": ["/usr/bin/git"],
+//     "default": "allow"|"ask"|"deferInAuto"|"abstain",
+//     "deny":        [ {"argv": <matcher>, "reason": "" } ],
+//     "ask":         [ ... ],
+//     "deferInAuto": [ ... ],
+//     "rewrite":     [ {"argv": <matcher>, "to": "jail-python", "reason": "" } ],
+//     "allow":       [ ... ] }
 // Matchers (against argv AFTER argv[0]); a matcher object may carry MULTIPLE keys,
 // ALL of which must hold (AND); at least one key is required:
 //   contains:      every listed token present as an argv token (any position)
@@ -240,12 +249,19 @@ function matches(rule, args) {
   return any;
 }
 
-// Evaluate one config against args -> { decision, reason, to? }. `default` may be
-// "allow" (git-style: allow-by-default) or "abstain" (interpreter-style:
-// non-matching invocations fall through to the normal permission flow untouched).
+// Evaluate one config against args -> { decision, reason, to? }. Bucket order
+// (strongest first): deny > ask > deferInAuto > rewrite > allow > default.
+//   deny        - hard block, every mode.
+//   ask         - always prompt, every mode (including auto).
+//   deferInAuto - prompt in interactive modes; pass through in "auto" mode when
+//                 COMMAND_POLICY_DEFER_IN_AUTO is set (else behaves like ask).
+//   allow       - silent.
+// `default` may be "allow" (git-style allow-by-default), "ask", "deferInAuto", or
+// "abstain" (interpreter-style: non-matching invocations fall through untouched).
 function evaluate(cfg, args) {
   for (const rule of cfg.deny || []) if (matches(rule, args)) return { decision: 'deny', reason: rule.reason || '' };
   for (const rule of cfg.ask || []) if (matches(rule, args)) return { decision: 'ask', reason: rule.reason || '' };
+  for (const rule of cfg.deferInAuto || []) if (matches(rule, args)) return { decision: 'deferInAuto', reason: rule.reason || '' };
   for (const rule of cfg.rewrite || []) if (matches(rule, args)) return { decision: 'rewrite', reason: rule.reason || '', to: rule.to };
   for (const rule of cfg.allow || []) if (matches(rule, args)) return { decision: 'allow', reason: rule.reason || '' };
   return { decision: cfg.default || 'allow', reason: '' };
@@ -274,9 +290,10 @@ function main() {
     return false;
   };
 
-  // Worst decision tracked over {allow, ask, deny} only; rewrite is an
-  // allow-level transform tracked separately as splices.
-  const RANK = { allow: 0, ask: 1, deny: 2 };
+  // Worst decision tracked over {allow, deferInAuto, ask, deny} only; rewrite is
+  // an allow-level transform tracked separately as splices. Most conservative
+  // segment wins: deny > ask > deferInAuto > allow.
+  const RANK = { allow: 0, deferInAuto: 1, ask: 2, deny: 3 };
   let worst = { decision: 'allow', reason: '' };
   const bump = (v) => { if (RANK[v.decision] > RANK[worst.decision]) worst = v; };
 
@@ -290,11 +307,12 @@ function main() {
     const values = argv.map((t) => t.v);
 
     // A leading `sh -c` / `bash -c` / `zsh -c` "STRING" hides an opaque inner
-    // command. Treat as managed+ask only if the raw command mentions a managed
-    // tool; otherwise it's an unmanaged shell invocation.
+    // command. This is a fail-closed (can't-analyze) case -> deferInAuto: prompt
+    // interactively, pass through in auto. Only when the raw command mentions a
+    // managed tool; otherwise it's an unmanaged shell invocation.
     const base0 = path.basename(values[0]);
     if (['sh', 'bash', 'zsh'].includes(base0) && values.includes('-c')) {
-      if (mentionsManaged()) { managedCount++; bump({ decision: 'ask', reason: `command-policy: '${base0} -c' runs an opaque inner command mentioning a gated tool — approve to run.` }); }
+      if (mentionsManaged()) { managedCount++; bump({ decision: 'deferInAuto', reason: `command-policy: '${base0} -c' runs an opaque inner command mentioning a gated tool — approve to run.` }); }
       else unmanagedCount++;
       continue;
     }
@@ -319,28 +337,30 @@ function main() {
     bump(v);
   }
 
-  // Unparseable input: fail closed to ask ONLY if a managed tool is mentioned.
+  // Unparseable input: fail closed ONLY if a managed tool is mentioned. This is a
+  // can't-analyze case -> deferInAuto (prompt interactively, pass through in auto).
   if (unparseable && mentionsManaged()) {
-    bump({ decision: 'ask', reason: 'command-policy: command not statically parseable (command substitution / unbalanced quotes) and mentions a gated tool — approve to run.' });
+    bump({ decision: 'deferInAuto', reason: 'command-policy: command not statically parseable (command substitution / unbalanced quotes) and mentions a gated tool — approve to run.' });
     managedCount++;
   }
 
-  // Decision:
-  //  - deny     -> emit (hard block, every permission mode).
-  //  - ask      -> emit (effective because gated tools have no overlapping allow),
-  //               EXCEPT in "auto" permission mode with COMMAND_POLICY_DEFER_IN_AUTO
-  //               opt-in: `ask` is advisory (there is no human to confirm with in
-  //               auto), so abstain and let auto-mode's own flow decide. `deny`
-  //               still blocks — promote must-gate-in-auto ops from ask -> deny.
-  //  - rewrite  -> only when EVERY segment is managed (never greenlight unmanaged
-  //               parts of a compound). Splice command words -> emit allow +
-  //               updatedInput so the boxed command runs with no prompt.
-  //  - allow    -> emit explicit allow ONLY when every segment is managed-safe.
-  //  - else     -> abstain (normal permission flow).
+  // Decision (tiers, strongest first):
+  //  - deny        -> emit (hard block, every permission mode; agent cannot run it).
+  //  - ask         -> emit (always prompt, every mode INCLUDING auto — no deferral).
+  //  - deferInAuto -> in "auto" mode with COMMAND_POLICY_DEFER_IN_AUTO opt-in,
+  //                   abstain (pass through to auto-mode's own flow — no human to
+  //                   confirm with in auto). Otherwise (interactive, or flag unset)
+  //                   emit `ask` so it still prompts.
+  //  - rewrite     -> only when EVERY segment is managed (never greenlight unmanaged
+  //                   parts of a compound). Splice command words -> emit allow +
+  //                   updatedInput so the boxed command runs with no prompt.
+  //  - allow       -> emit explicit allow ONLY when every segment is managed-safe.
+  //  - else        -> abstain (normal permission flow).
   if (worst.decision === 'deny') return emit('deny', worst.reason);
-  if (worst.decision === 'ask') {
-    const deferInAuto = /^(1|true|yes|on)$/i.test(process.env.COMMAND_POLICY_DEFER_IN_AUTO || '');
-    if (deferInAuto && payload.permission_mode === 'auto') return abstain();
+  if (worst.decision === 'ask') return emit('ask', worst.reason);
+  if (worst.decision === 'deferInAuto') {
+    const masterOn = /^(1|true|yes|on)$/i.test(process.env.COMMAND_POLICY_DEFER_IN_AUTO || '');
+    if (masterOn && payload.permission_mode === 'auto') return abstain();
     return emit('ask', worst.reason);
   }
 

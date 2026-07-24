@@ -27,7 +27,7 @@ One Node engine (`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/command-policy/command-pol
    strips leading `VAR=val`, and drops fd-duplication redirects like `2>&1`/`>&2`
    as noise — file-writing redirects `>`/`>>`/`&>file` are left intact). Command
    substitution `$(…)`, backticks, unbalanced quotes, and `sh -c "…"` are opaque →
-   **fail closed to `ask`**.
+   **fail closed to `deferInAuto`** (prompt interactively, pass through in `auto`).
 3. **Resolves the real binary** for each segment's command word (`realpath`, with
    the shim/command-policy dirs stripped from PATH). So `git`, `/usr/bin/git`,
    `git-real`, and copies all map to the same policy — a PATH shim cannot do this.
@@ -36,31 +36,42 @@ One Node engine (`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/command-policy/command-pol
    `deny > ask > allow`.
 
 Decisions (git is **fully hook-owned** — the hook emits explicit verdicts; see
-"Why hook-owned" below):
+"Why hook-owned" below). Verdict tiers, strongest → weakest:
+- **deny** → hard block with a `reason`. Agent *cannot* run it, in any mode. Use
+  for genuinely irreversible / prod-destructive ops that must never auto-run.
+- **ask** → standard inline approval prompt on the real command, in **every** mode
+  including `auto`. Approve → runs; reject → blocked. The human-always-in-the-loop
+  tier and the escape hatch (no `real`/`-real` wrapper needed).
+- **deferInAuto** → prompts like `ask` in interactive modes, but in `auto` mode
+  **passes through** (abstains → auto-mode's own flow) when the opt-in env flag is
+  set. "Confirm unless autonomous." See below.
 - **allow** → explicit `permissionDecision: "allow"`, emitted only when *every*
   segment is a managed-safe op (never greenlights unmanaged parts of a compound).
-  Runs with no prompt. This is what makes non-gated git (`push`, `reset --soft`,
-  `branch <name>`) frictionless without any allowlist entry.
-- **ask** → Claude shows the standard inline approval prompt on the real command.
-  Approve → runs; reject → blocked. This is the escape hatch — no `real`/`-real`
-  wrapper needed (that was only necessary for shims, which can block but not prompt).
+  Runs with no prompt. Makes non-gated git (`push`, `reset --soft`, `branch <name>`)
+  frictionless without any allowlist entry.
 - **abstain** (exit 0 silent) → for unmanaged commands and mixed compounds
   (managed-safe + unmanaged), so the normal permission flow handles them unchanged.
-- **deny** → hard block with a redirect `reason`. Reserved for future hard-blocks
-  (e.g. Phase-2 interpreter → py-jail redirect). No git rule uses `deny` in v1.
 
-### Auto-mode deferral (opt-in)
+Precedence across a compound: `deny > ask > deferInAuto > allow` (most conservative
+segment wins). `default` accepts `allow` | `ask` | `deferInAuto` | `abstain`.
 
-By default `ask` prompts in every permission mode — including `auto`. Set the env
-var `COMMAND_POLICY_DEFER_IN_AUTO=1` (in your settings.json `env`) to make `ask`
-**advisory in `auto` mode only**: when `permission_mode` is `auto`, an `ask`
-verdict *abstains* (flows down to auto-mode's own permission handling) instead of
-interrupting — there is no human to confirm with in auto. `deny` still hard-blocks
-in every mode, and all other modes (`default`/`acceptEdits`/`plan`) are unaffected.
-Promote any op that must stay gated even in auto from `ask` → `deny`. Default (flag
-unset) preserves strict behavior. In the jail, nono still enforces at the kernel
-regardless; on bare host, command-policy is the only layer, so `auto` + this flag
-means no command gating there beyond `deny`.
+### Auto-mode deferral (`deferInAuto` tier + opt-in flag)
+
+The `deferInAuto` tier is inert unless env `COMMAND_POLICY_DEFER_IN_AUTO=1` is set
+(in settings.json `env`); without it, `deferInAuto` behaves exactly like `ask`
+(fully strict — safe default for shared installs). With the flag set **and**
+`permission_mode === 'auto'`, a `deferInAuto` verdict *abstains* — there is no human
+to confirm with in auto, so it flows down to auto-mode's own handling. `ask` still
+prompts and `deny` still blocks in every mode; other modes (`default`/`acceptEdits`/
+`plan`) are unaffected. Classify by intent: force-push, `kubectl delete`, prod
+`exec` → `ask`/`deny`; noisy-but-safe or unanalyzable ops → `deferInAuto`.
+
+**Fail-closed cases** (command substitution `$(…)`, backticks, unbalanced quotes,
+opaque `sh -c "…"`) that mention a gated tool resolve to **`deferInAuto`**: they
+prompt interactively but pass through in `auto`+flag. Accepted risk: in `auto` the
+engine cannot see inside an unparseable command, so a danger op hidden in `$(…)`
+will run un-prompted. In the jail nono still enforces at the kernel; on bare host
+command-policy is the only layer, so `auto`+flag means no gating there beyond `deny`.
 
 ### Why hook-owned (not allowlist + hook)
 

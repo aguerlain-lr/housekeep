@@ -80,18 +80,39 @@ probe abstain "grep still unmanaged"      '"git log | grep fix | head"'
 # auto-mode defer (opt-in COMMAND_POLICY_DEFER_IN_AUTO=1): in "auto" mode with the
 # flag, `ask` verdicts abstain (flow down to auto-mode). Without the flag, or in
 # any other mode, `ask` still prompts. `deny` always blocks (tested inline below).
-aprobe() { # <expected> <desc> <cmd-json> <mode> <flag:0|1>
-  local expected="$1" desc="$2" cmd="$3" mode="$4" flag="$5" out dec
-  out=$(printf '%s' "{\"tool_name\":\"Bash\",\"permission_mode\":\"$mode\",\"tool_input\":{\"command\":$cmd}}" | COMMAND_POLICY_DEFER_IN_AUTO="$flag" "$ENGINE")
+# Verdict tiers in "auto" mode (flag = COMMAND_POLICY_DEFER_IN_AUTO):
+#   deny        -> always BLOCK      ask -> always PROMPT (even auto+flag)
+#   deferInAuto -> PASS in auto+flag, else PROMPT
+aprobe() { # <expected> <desc> <cmd-json> <mode> <flag:0|1> [config-dir]
+  local expected="$1" desc="$2" cmd="$3" mode="$4" flag="$5" cfgdir="${6:-}" out dec extra=""
+  [ -n "$cfgdir" ] && extra="COMMAND_POLICY_CONFIG_DIR=$cfgdir"
+  out=$(printf '%s' "{\"tool_name\":\"Bash\",\"permission_mode\":\"$mode\",\"tool_input\":{\"command\":$cmd}}" | env COMMAND_POLICY_DEFER_IN_AUTO="$flag" $extra "$ENGINE")
   if [ -z "$out" ]; then dec="abstain"; else dec=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision' 2>/dev/null); fi
-  if [ "$dec" = "$expected" ]; then printf 'PASS  %-45s %s\n' "$desc" "$dec"; else printf 'FAIL  %-45s expected=%s got=%s\n' "$desc" "$expected" "$dec"; FAIL=$((FAIL+1)); fi
+  if [ "$dec" = "$expected" ]; then printf 'PASS  %-48s %s\n' "$desc" "$dec"; else printf 'FAIL  %-48s expected=%s got=%s\n' "$desc" "$expected" "$dec"; FAIL=$((FAIL+1)); fi
 }
-aprobe abstain "auto+flag: force-push defers"    '"git push --force"'      auto    1
-aprobe abstain "auto+flag: reset --hard defers"  '"git reset --hard"'      auto    1
-aprobe abstain "auto+flag: unparseable defers"   '"x=$(git push --force)"' auto    1
-aprobe ask     "auto NO flag: still prompts"     '"git push --force"'      auto    0
-aprobe ask     "default+flag: still prompts"     '"git push --force"'      default 1
-aprobe allow   "auto+flag: safe op still allow"  '"git status"'            auto    1
+# ask tier ALWAYS prompts (deliberate danger gates survive auto)
+aprobe ask     "ask: force-push, auto+flag"        '"git push --force"'      auto    1
+aprobe ask     "ask: reset --hard, auto+flag"      '"git reset --hard"'      auto    1
+# deferInAuto tier (fail-closed): passes in auto+flag, prompts otherwise
+aprobe abstain "defer: unparseable, auto+flag"     '"x=$(git status)"'       auto    1
+aprobe ask     "defer: unparseable, auto NO flag"  '"x=$(git status)"'       auto    0
+aprobe ask     "defer: unparseable, default+flag"  '"x=$(git status)"'       default 1
+aprobe abstain "defer: sh -c opaque, auto+flag"    '"sh -c \"git status\""'  auto    1
+aprobe ask     "defer: sh -c opaque, interactive"  '"sh -c \"git status\""'  default 1
+# ACCEPTED RISK: unparseable can hide a danger op; in auto+flag it still passes.
+aprobe abstain "defer: hides force-push, auto+flag" '"x=$(git push --force)"' auto   1
+aprobe allow   "safe op still allow, auto+flag"    '"git status"'            auto    1
+
+# All four tiers via a fixture config (git config ships no deny/deferInAuto rules).
+FIX="$(mktemp -d)"
+printf '%s' '{"tool":"foo","binaries":[],"default":"allow","deny":[{"argv":{"contains":["nuke"]}}],"ask":[{"argv":{"contains":["danger"]}}],"deferInAuto":[{"argv":{"contains":["softish"]}}],"allow":[{"argv":{"prefix":["ok"]}}]}' > "$FIX/foo.json"
+aprobe deny    "fixture deny: blocks in auto+flag"     '"foo nuke"'    auto    1 "$FIX"
+aprobe ask     "fixture ask: prompts in auto+flag"     '"foo danger"'  auto    1 "$FIX"
+aprobe abstain "fixture defer: passes auto+flag"       '"foo softish"' auto    1 "$FIX"
+aprobe ask     "fixture defer: prompts interactive"    '"foo softish"' default 1 "$FIX"
+aprobe ask     "fixture defer: prompts auto no-flag"   '"foo softish"' auto    0 "$FIX"
+aprobe allow   "fixture allow: silent"                 '"foo ok"'      auto    1 "$FIX"
+rm -rf "$FIX"
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL DETERMINISTIC PROBES PASS"; else echo "$FAIL FAIL(s)"; fi
