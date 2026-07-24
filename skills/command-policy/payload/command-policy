@@ -133,9 +133,18 @@ function parse(command) {
     }
 
     // Operators (outside quotes) -> segment boundaries.
-    if (c === '|' || c === '&') {
+    if (c === '&') {
+      // `>&` fd-duplication (2>&1, >&2, 1>&2, 2>&-) is a redirect, not an
+      // operator: keep the `&` attached to the current token (stripped later).
+      // `&&` (logical) and lone `&` (background) stay segment boundaries.
+      if (command[i + 1] !== '&' && hasTok && tok.endsWith('>')) { tok += c; i++; continue; }
       pushSeg();
-      i += (command[i + 1] === c) ? 2 : 1; // || &&  vs  | &
+      i += (command[i + 1] === '&') ? 2 : 1; // && vs lone &
+      continue;
+    }
+    if (c === '|') {
+      pushSeg();
+      i += (command[i + 1] === '|') ? 2 : 1; // || vs |
       continue;
     }
     if (c === ';') { pushSeg(); i++; continue; }
@@ -153,6 +162,14 @@ function stripEnv(tokens) {
   let k = 0;
   while (k < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[k].v)) k++;
   return tokens.slice(k);
+}
+
+// Drop fd-duplication / fd-close redirect tokens (2>&1, >&2, 1>&2, 2>&-). These
+// perform no file write, so they are noise for policy matching. File-writing
+// redirects (>, >>, 2>file, &>file) are deliberately NOT stripped — they keep
+// their normal (unmatched -> abstain -> prompt) treatment.
+function stripRedirects(tokens) {
+  return tokens.filter((t) => !/^\d*>&\d*-?$/.test(t.v));
 }
 
 // ---- Resolution -----------------------------------------------------------
@@ -268,7 +285,7 @@ function main() {
   let unmanagedCount = 0;
 
   for (const seg of segments) {
-    const argv = stripEnv(seg);
+    const argv = stripRedirects(stripEnv(seg));
     if (!argv.length) continue;
     const values = argv.map((t) => t.v);
 

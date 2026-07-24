@@ -1,0 +1,8 @@
+{
+  "tool": "head",
+  "binaries": ["/usr/bin/head"],
+  "default": "allow",
+  "allow": [],
+  "ask": [],
+  "deny": []
+}

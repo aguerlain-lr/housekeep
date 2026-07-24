@@ -62,6 +62,21 @@ probe ask   "command substitution"        '"x=$(git push --force)"'
 probe ask   "backtick"                    '"echo `git push --force`"'
 probe ask   "sh -c opaque"                '"sh -c \"git push --force\""'
 
+# fd-duplication redirects (2>&1, >&2, ...) are stripped, not treated as
+# operators -> managed command stays managed; danger detection still fires.
+probe allow "git status 2>&1"             '"git status 2>&1"'
+probe allow "git log --oneline 2>&1"      '"git log --oneline 2>&1"'
+probe ask   "danger survives 2>&1"        '"git push --force 2>&1"'
+
+# head/tail are safe read-only sinks -> managed-allow (frictionless pipes).
+probe allow "head standalone"             '"head -20 file.txt"'
+probe allow "tail -f standalone"          '"tail -f /var/log/x"'
+probe allow "git log | head"              '"git log | head"'
+probe allow "git log --oneline | tail -5" '"git log --oneline | tail -5"'
+probe allow "managed pipe + 2>&1"         '"git log 2>&1 | head -20"'
+probe ask   "danger in head pipe"         '"git push --force | head"'
+probe abstain "grep still unmanaged"      '"git log | grep fix | head"'
+
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL DETERMINISTIC PROBES PASS"; else echo "$FAIL FAIL(s)"; fi
 echo

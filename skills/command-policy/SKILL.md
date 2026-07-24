@@ -24,8 +24,10 @@ One Node engine (`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/command-policy/command-pol
 
 1. Reads the payload on stdin; extracts `tool_input.command`.
 2. **Parses** the command into segments (splits on `| && || ; &`, honors quotes,
-   strips leading `VAR=val`). Command substitution `$(…)`, backticks, unbalanced
-   quotes, and `sh -c "…"` are opaque → **fail closed to `ask`**.
+   strips leading `VAR=val`, and drops fd-duplication redirects like `2>&1`/`>&2`
+   as noise — file-writing redirects `>`/`>>`/`&>file` are left intact). Command
+   substitution `$(…)`, backticks, unbalanced quotes, and `sh -c "…"` are opaque →
+   **fail closed to `ask`**.
 3. **Resolves the real binary** for each segment's command word (`realpath`, with
    the shim/command-policy dirs stripped from PATH). So `git`, `/usr/bin/git`,
    `git-real`, and copies all map to the same policy — a PATH shim cannot do this.
