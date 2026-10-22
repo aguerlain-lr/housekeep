@@ -22,8 +22,10 @@
 //     "deny":        [ {"argv": <matcher>, "reason": "" } ],
 //     "ask":         [ ... ],
 //     "deferInAuto": [ ... ],
-//     "rewrite":     [ {"argv": <matcher>, "to": "jail-python", "reason": "" } ],
-//     "allow":       [ ... ] }
+//     "rewrite":     [ {"argv": <matcher>, "to": "sandbox-run python3",
+//                       "wrap": "sandbox-run", "fallbackTo": "<old wrapper>", "reason": "" } ],
+//     "allow":       [ ... ],
+//     "wrapSafe":    true|false }
 // Matchers (against argv AFTER argv[0]); a matcher object may carry MULTIPLE keys,
 // ALL of which must hold (AND); at least one key is required:
 //   contains:      every listed token present as an argv token (any position)
@@ -35,9 +37,18 @@
 //                  scratch root (/tmp, /private/tmp, /var/folders, $TMPDIR)
 //
 // The `rewrite` bucket transparently swaps a segment's command word for `to`
-// (a boxed wrapper, e.g. jail-python) and emits allow + hookSpecificOutput.
-// updatedInput so the boxed command runs with no prompt. Rewrite fires only when
-// EVERY segment is managed (never greenlights unmanaged parts of a compound).
+// (a sandboxed runner, e.g. `sandbox-run python3`) and emits allow +
+// hookSpecificOutput.updatedInput so the sandboxed command runs with no prompt.
+// Rewrite fires only when EVERY segment is managed (never greenlights unmanaged
+// parts of a compound).
+//
+// `wrap` names the shared runner behind `to`. When several segments need it, the
+// whole command runs inside it once (`<wrap> sh -c '<command>'`) — provided every
+// other segment is an allowed segment of a `wrapSafe` (read-only) config and
+// nothing redirects to a file; otherwise the command is denied with instructions
+// to split it (the same runner twice in one pipeline hangs). If `wrap` is not on
+// PATH (a session started before the runner existed), `fallbackTo` is spliced
+// per segment instead.
 
 'use strict';
 const fs = require('fs');
@@ -54,6 +65,9 @@ const SHIM_DIRS = [
 // Scratch roots for scratchScript detection (agent-authored throwaway scripts).
 const SCRATCH_ROOTS = ['/tmp/', '/private/tmp/', '/var/folders/', '/private/var/folders/']
   .concat(process.env.TMPDIR ? [process.env.TMPDIR.replace(/\/?$/, '/')] : []);
+// The one directory sandboxed interpreter code may write (named in deny messages).
+const SCRATCH_DIR = process.env.COMMAND_POLICY_SCRATCH_DIR
+  || path.join(process.env.HOME || '', '.command-policy', 'scratch');
 
 // ---- IO -------------------------------------------------------------------
 
@@ -344,6 +358,15 @@ function realpathSafe(p) {
   try { return fs.realpathSync(p); } catch (_) { return p; }
 }
 
+// Whether a bare command name is runnable in this session. Unlike resolveBinary,
+// shim dirs count: a nono command edge exists only as a shim on PATH.
+function onPath(name) {
+  for (const dir of (process.env.PATH || '').split(':').filter(Boolean)) {
+    try { fs.accessSync(path.join(dir, name), fs.constants.X_OK); return true; } catch (_) {}
+  }
+  return false;
+}
+
 function resolveBinary(arg0) {
   if (arg0.includes('/')) return realpathSafe(arg0);
   const parts = (process.env.PATH || '').split(':').filter(Boolean)
@@ -419,7 +442,7 @@ function evaluate(cfg, args) {
   for (const rule of cfg.deny || []) if (matches(rule, args)) return { decision: 'deny', reason: rule.reason || '' };
   for (const rule of cfg.ask || []) if (matches(rule, args)) return { decision: 'ask', reason: rule.reason || '' };
   for (const rule of cfg.deferInAuto || []) if (matches(rule, args)) return { decision: 'deferInAuto', reason: rule.reason || '' };
-  for (const rule of cfg.rewrite || []) if (matches(rule, args)) return { decision: 'rewrite', reason: rule.reason || '', to: rule.to };
+  for (const rule of cfg.rewrite || []) if (matches(rule, args)) return { decision: 'rewrite', reason: rule.reason || '', to: rule.to, wrap: rule.wrap, fallbackTo: rule.fallbackTo };
   for (const rule of cfg.allow || []) if (matches(rule, args)) return { decision: 'allow', reason: rule.reason || '' };
   return { decision: cfg.default || 'allow', reason: '' };
 }
@@ -460,14 +483,28 @@ function main() {
   let worst = { decision: 'allow', reason: '' };
   const bump = (v) => { if (RANK[v.decision] > RANK[worst.decision]) worst = v; };
 
-  const rewrites = [];   // { s, e, to } splices into the original command
+  const rewrites = [];   // { s, e, to, wrap, fallbackTo } splices into the original command
   let managedCount = 0;
   let unmanagedCount = 0;
+  // Whole-command wrap eligibility: every non-rewrite segment must be an allowed
+  // segment of a `wrapSafe` (read-only) config, and no segment may redirect
+  // output to a real file (inside the wrap that write would land in the sandbox).
+  let notWrapSafe = 0;
+  const blockers = new Set();
+  let fileRedirect = false;
+  let nonEmptySegments = 0;
 
   for (const seg of segments) {
     const argv = stripRedirects(stripEnv(seg));
     if (!argv.length) continue;
+    nonEmptySegments++;
     const values = argv.map((t) => t.v);
+    for (let k = 0; k < values.length; k++) {
+      const m = /^(\d*|&)>>?\|?(.*)$/.exec(values[k]);
+      if (!m) continue;
+      const target = m[2] || values[k + 1] || '';
+      if (target !== '/dev/null') fileRedirect = true;
+    }
 
     // A leading `sh -c` / `bash -c` / `zsh -c` "STRING" hides an opaque inner
     // command. This is a fail-closed (can't-analyze) case -> deferInAuto: prompt
@@ -521,9 +558,10 @@ function main() {
 
     managedCount++;
     if (v.decision === 'rewrite' && v.to) {
-      rewrites.push({ s: argv[0].s, e: argv[0].e, to: v.to });
+      rewrites.push({ s: argv[0].s, e: argv[0].e, to: v.to, wrap: v.wrap, fallbackTo: v.fallbackTo });
       continue;
     }
+    if (!(v.decision === 'allow' && cfg.wrapSafe)) { notWrapSafe++; blockers.add(path.basename(values[0])); }
     if (v.decision !== 'allow' && !v.reason) {
       v.reason = `command-policy: '${cfg.tool} ${display(args)}' requires approval.`;
     }
@@ -559,12 +597,44 @@ function main() {
   }
 
   if (rewrites.length && unmanagedCount === 0) {
-    // Apply splices right-to-left so earlier offsets stay valid.
-    rewrites.sort((a, b) => b.s - a.s);
-    let cmd = command;
-    for (const r of rewrites) cmd = cmd.slice(0, r.s) + r.to + cmd.slice(r.e);
-    const updatedInput = Object.assign({}, payload.tool_input, { command: cmd });
-    return emit('allow', 'command-policy: interpreter inline/scratch code auto-boxed (no network, repo read-only).', updatedInput);
+    const reason = 'command-policy: interpreter inline/scratch code runs sandboxed (no network, repo read-only).';
+    const splice = (field) => {
+      // Apply splices right-to-left so earlier offsets stay valid.
+      const sorted = rewrites.slice().sort((a, b) => b.s - a.s);
+      let cmd = command;
+      for (const r of sorted) cmd = cmd.slice(0, r.s) + r[field] + cmd.slice(r.e);
+      return emit('allow', reason, Object.assign({}, payload.tool_input, { command: cmd }));
+    };
+    const wrap = rewrites[0].wrap;
+    const oneWrap = wrap && rewrites.every((r) => r.wrap === wrap);
+    if (!oneWrap) return splice('to');
+    // A session whose sandbox predates the shared edge has no `wrap` command on
+    // its PATH: keep it on the per-interpreter commands it does have.
+    if (!onPath(wrap)) {
+      return rewrites.every((r) => r.fallbackTo) ? splice('fallbackTo') : abstain();
+    }
+    // Several segments sharing one edge: run the whole command inside it, so the
+    // pipes between them never cross an edge boundary (nono hangs when the same
+    // edge appears twice in one pipeline).
+    if (nonEmptySegments > 1 && notWrapSafe === 0 && !fileRedirect) {
+      const quoted = "'" + command.replace(/'/g, "'\\''") + "'";
+      return emit('allow', reason, Object.assign({}, payload.tool_input, { command: `${wrap} sh -c ${quoted}` }));
+    }
+    // Can't wrap, and two or more segments would hit the same edge (which hangs):
+    // refuse, and tell the agent how to split the command so each call works.
+    if (rewrites.length > 1) {
+      const why = [];
+      if (blockers.size) why.push(`${[...blockers].join(', ')} can't run in the sandbox`);
+      if (fileRedirect) why.push('it redirects output to a file, which the sandbox cannot write');
+      return emit('deny', [
+        `command-policy: split this into separate Bash calls — it runs interpreter code (python/node/perl/awk) more than once, and ${why.join(' and ')}.`,
+        `Rules: (1) interpreter code runs sandboxed: no network, repo read-only, writable scratch dir ${SCRATCH_DIR}.`,
+        '(2) Several interpreter calls can share one command only when every other step is a read-only tool (cat, ls, grep, rg, jq, sed, sort, uniq, wc, cut, tr, head, tail, find, echo, printf, diff, cd) and nothing redirects to a file.',
+        '(3) A single interpreter call can be combined with anything, and can redirect its own output (python3 -c ... > out.txt).',
+        '(4) Run git, network tools and file writes in their own call, passing data between calls through a file.',
+      ].join(' '));
+    }
+    return splice('to');
   }
 
   if (managedCount >= 1 && unmanagedCount === 0) return emit('allow', '');

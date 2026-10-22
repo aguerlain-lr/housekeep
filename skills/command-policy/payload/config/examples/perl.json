@@ -3,8 +3,42 @@
   "binaries": [],
   "default": "abstain",
   "rewrite": [
-    { "argv": { "contains": ["-e"], "notContains": ["-i"] }, "to": "jail-perl", "reason": "inline perl code auto-boxed (no network, repo read-only)" },
-    { "argv": { "contains": ["-E"], "notContains": ["-i"] }, "to": "jail-perl", "reason": "inline perl code auto-boxed (no network, repo read-only)" },
-    { "argv": { "scratchScript": true, "notContains": ["-i"] }, "to": "jail-perl", "reason": "scratch perl script auto-boxed (no network, repo read-only)" }
+    {
+      "argv": {
+        "contains": [
+          "-e"
+        ],
+        "notContains": [
+          "-i"
+        ]
+      },
+      "to": "sandbox-run perl",
+      "reason": "inline perl code auto-boxed (no network, repo read-only)",
+      "wrap": "sandbox-run"
+    },
+    {
+      "argv": {
+        "contains": [
+          "-E"
+        ],
+        "notContains": [
+          "-i"
+        ]
+      },
+      "to": "sandbox-run perl",
+      "reason": "inline perl code auto-boxed (no network, repo read-only)",
+      "wrap": "sandbox-run"
+    },
+    {
+      "argv": {
+        "scratchScript": true,
+        "notContains": [
+          "-i"
+        ]
+      },
+      "to": "sandbox-run perl",
+      "reason": "scratch perl script auto-boxed (no network, repo read-only)",
+      "wrap": "sandbox-run"
+    }
   ]
 }

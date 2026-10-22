@@ -1,8 +1,11 @@
 {
   "tool": "tail",
-  "binaries": ["/usr/bin/tail"],
+  "binaries": [
+    "/usr/bin/tail"
+  ],
   "default": "allow",
   "allow": [],
   "ask": [],
-  "deny": []
+  "deny": [],
+  "wrapSafe": true
 }

@@ -1,8 +1,11 @@
 {
   "tool": "head",
-  "binaries": ["/usr/bin/head"],
+  "binaries": [
+    "/usr/bin/head"
+  ],
   "default": "allow",
   "allow": [],
   "ask": [],
-  "deny": []
+  "deny": [],
+  "wrapSafe": true
 }

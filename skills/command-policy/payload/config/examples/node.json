@@ -3,10 +3,53 @@
   "binaries": [],
   "default": "abstain",
   "rewrite": [
-    { "argv": { "contains": ["-e"] }, "to": "jail-node", "reason": "inline node code auto-boxed (no network, repo read-only)" },
-    { "argv": { "contains": ["-p"] }, "to": "jail-node", "reason": "inline node code auto-boxed (no network, repo read-only)" },
-    { "argv": { "contains": ["--eval"] }, "to": "jail-node", "reason": "inline node code auto-boxed (no network, repo read-only)" },
-    { "argv": { "contains": ["--print"] }, "to": "jail-node", "reason": "inline node code auto-boxed (no network, repo read-only)" },
-    { "argv": { "scratchScript": true }, "to": "jail-node", "reason": "scratch node script auto-boxed (no network, repo read-only)" }
+    {
+      "argv": {
+        "contains": [
+          "-e"
+        ]
+      },
+      "to": "sandbox-run node",
+      "reason": "inline node code auto-boxed (no network, repo read-only)",
+      "wrap": "sandbox-run"
+    },
+    {
+      "argv": {
+        "contains": [
+          "-p"
+        ]
+      },
+      "to": "sandbox-run node",
+      "reason": "inline node code auto-boxed (no network, repo read-only)",
+      "wrap": "sandbox-run"
+    },
+    {
+      "argv": {
+        "contains": [
+          "--eval"
+        ]
+      },
+      "to": "sandbox-run node",
+      "reason": "inline node code auto-boxed (no network, repo read-only)",
+      "wrap": "sandbox-run"
+    },
+    {
+      "argv": {
+        "contains": [
+          "--print"
+        ]
+      },
+      "to": "sandbox-run node",
+      "reason": "inline node code auto-boxed (no network, repo read-only)",
+      "wrap": "sandbox-run"
+    },
+    {
+      "argv": {
+        "scratchScript": true
+      },
+      "to": "sandbox-run node",
+      "reason": "scratch node script auto-boxed (no network, repo read-only)",
+      "wrap": "sandbox-run"
+    }
   ]
 }

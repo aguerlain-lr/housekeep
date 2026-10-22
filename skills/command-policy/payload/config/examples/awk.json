@@ -3,6 +3,15 @@
   "binaries": [],
   "default": "abstain",
   "rewrite": [
-    { "argv": { "notContains": ["-f"] }, "to": "jail-awk", "reason": "inline awk program auto-boxed (no network, repo read-only)" }
+    {
+      "argv": {
+        "notContains": [
+          "-f"
+        ]
+      },
+      "to": "sandbox-run awk",
+      "reason": "inline awk program auto-boxed (no network, repo read-only)",
+      "wrap": "sandbox-run"
+    }
   ]
 }
