@@ -94,74 +94,231 @@ function emit(decision, reason, updatedInput) {
 
 // ---- Parsing --------------------------------------------------------------
 
+// Sentinels standing in for the *value* of an expansion. The body is analyzed
+// (see parse); the value itself is not knowable at hook time.
+//   SUBST_Q - quoted expansion ("$(…)", "`…`"), arithmetic $((…)), or process
+//             substitution <(…): NO word splitting, so it contributes exactly ONE
+//             argv token. Treated like a plain `$VAR` — unknown string, known
+//             command shape — and so is not a policy blocker.
+//   SUBST   - unquoted $(…) / `…`: the value is word-split and globbed, so it can
+//             expand into an ARBITRARY argv list (`git $(printf 'push --force')`).
+//             The shape of the command is unknown -> main() fails closed.
+const NUL = String.fromCharCode(0);
+const SUBST = NUL + 'subst' + NUL;
+const SUBST_Q = NUL + 'substq' + NUL;
+
+// Guard against pathological nesting (also stops runaway recursion on malformed
+// input); exceeding it is treated as unparseable -> fail closed.
+const MAX_NEST = 32;
+
 // Tokenize a Bash string into segments (split on top-level | && || ; &) while
 // respecting single/double quotes and backslash escapes. Each token is
 // { v: value, s: startOffset, e: endOffset } where [s,e) is the token's byte
 // range in the original command (including any quotes) — used to splice the
 // command word during rewrite. Returns { segments: [[tok,...], ...], unparseable }.
-// Sets unparseable on command/process substitution, backticks, or unbalanced quotes.
+//
+// Substitutions are NOT opaque. `$(...)`, backticks, `<(...)`/`>(...)` and bare
+// `( ... )` subshell groups all contain command lists that REALLY EXECUTE, so the
+// body is parsed recursively and its segments land in the same flat `segments`
+// list as the outer command — with absolute offsets, so rewrite splices stay
+// valid inside a substitution. That is the point of the recursion: `echo "$(rm
+// -rf ~)"` and `$( (rm -rf /) )` reach rm's deny rules, and substitutions nested
+// in double quotes are seen at all (they previously read as literal text).
+//
+// The substitution's RESULT is unknown, so it contributes SUBST (unquoted, may
+// word-split into an arbitrary argv) or SUBST_Q (quoted/arithmetic/process
+// substitution — exactly one token) to the enclosing token. See the sentinel
+// comments above for how main() treats each.
+//
+// Heredoc bodies (`<<EOF` / `<<-EOF` / `<<'EOF'`) are DATA and are skipped, not
+// tokenized — otherwise `git commit -m "$(cat <<'EOF' … EOF )"` would have its
+// commit message parsed as a command list. A body under an UNQUOTED delimiter does
+// undergo expansion, so a substitution in there fails closed.
+//
+// unparseable is set only on genuinely unbalanced input: an unterminated quote,
+// substitution or heredoc, or nesting past MAX_NEST.
 function parse(command) {
   const segments = [];
-  let cur = [];
-  let tok = '';
-  let hasTok = false;
-  let tokStart = -1;
+  const n = command.length;
   let unparseable = false;
   let i = 0;
-  const n = command.length;
 
-  const start = (pos) => { if (!hasTok) tokStart = pos; };
-  const pushTok = () => { if (hasTok) { cur.push({ v: tok, s: tokStart, e: i }); tok = ''; hasTok = false; tokStart = -1; } };
-  const pushSeg = () => { pushTok(); if (cur.length) segments.push(cur); cur = []; };
-
-  while (i < n) {
-    const c = command[i];
-
-    // Command / process substitution + backticks -> opaque, fail closed.
-    if (c === '`') { unparseable = true; break; }
-    if (c === '$' && command[i + 1] === '(') { unparseable = true; break; }
-    if ((c === '<' || c === '>') && command[i + 1] === '(') { unparseable = true; break; }
-
-    if (c === '\\') { // escape next char literally
-      if (i + 1 < n) { start(i); tok += command[i + 1]; hasTok = true; i += 2; continue; }
-      i++; continue;
+  // `$((expr))` — arithmetic expansion. No command runs, so just skip to the
+  // matching close paren. Enter with i at the `$`. Returns false on EOF.
+  function skipArith() {
+    i += 1; // past `$`, leaving i on the first `(`
+    let depth = 0;
+    while (i < n) {
+      const c = command[i];
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) { i++; return true; } }
+      i++;
     }
-    if (c === "'") { // single-quoted: literal until next '
-      const end = command.indexOf("'", i + 1);
-      if (end === -1) { unparseable = true; break; }
-      start(i); tok += command.slice(i + 1, end); hasTok = true; i = end + 1; continue;
-    }
-    if (c === '"') { // double-quoted: honor \ escapes, until next "
-      let j = i + 1; let s = '';
-      while (j < n && command[j] !== '"') {
-        if (command[j] === '\\' && j + 1 < n) { s += command[j + 1]; j += 2; }
-        else { s += command[j]; j++; }
-      }
-      if (j >= n) { unparseable = true; break; }
-      start(i); tok += s; hasTok = true; i = j + 1; continue;
-    }
-
-    // Operators (outside quotes) -> segment boundaries.
-    if (c === '&') {
-      // `>&` fd-duplication (2>&1, >&2, 1>&2, 2>&-) is a redirect, not an
-      // operator: keep the `&` attached to the current token (stripped later).
-      // `&&` (logical) and lone `&` (background) stay segment boundaries.
-      if (command[i + 1] !== '&' && hasTok && tok.endsWith('>')) { tok += c; i++; continue; }
-      pushSeg();
-      i += (command[i + 1] === '&') ? 2 : 1; // && vs lone &
-      continue;
-    }
-    if (c === '|') {
-      pushSeg();
-      i += (command[i + 1] === '|') ? 2 : 1; // || vs |
-      continue;
-    }
-    if (c === ';') { pushSeg(); i++; continue; }
-    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { pushTok(); i++; continue; }
-
-    start(i); tok += c; hasTok = true; i++;
+    return false;
   }
-  if (!unparseable) pushSeg();
+
+  // Tokenize a command list from i until `close` (or EOF when close is null),
+  // appending its segments to `segments`. Callers that capture the list's stdout
+  // into a token append SUBST themselves. Returns false when the input turned out
+  // to be unparseable.
+  function scanList(close, depth) {
+    if (depth > MAX_NEST) { unparseable = true; return false; }
+    let cur = [];
+    let tok = '';
+    let hasTok = false;
+    let tokStart = -1;
+
+    const start = (pos) => { if (!hasTok) tokStart = pos; };
+    const pushTok = () => { if (hasTok) { cur.push({ v: tok, s: tokStart, e: i }); tok = ''; hasTok = false; tokStart = -1; } };
+    const pushSeg = () => { pushTok(); if (cur.length) segments.push(cur); cur = []; };
+
+    while (i < n) {
+      const c = command[i];
+
+      if (close && c === close) { pushSeg(); i++; return true; }
+
+      // Expansions whose value lands in the current token.
+      if (c === '$' && command[i + 1] === '(' && command[i + 2] === '(') {
+        start(i);
+        if (!skipArith()) { unparseable = true; return false; }
+        tok += SUBST_Q; hasTok = true; continue;
+      }
+      if (c === '$' && command[i + 1] === '(') {
+        start(i); i += 2;
+        if (!scanList(')', depth + 1)) return false;
+        tok += SUBST; hasTok = true; continue;
+      }
+      if (c === '`') {
+        start(i); i += 1;
+        if (!scanList('`', depth + 1)) return false;
+        tok += SUBST; hasTok = true; continue;
+      }
+      if ((c === '<' || c === '>') && command[i + 1] === '(') {
+        start(i); i += 2;
+        if (!scanList(')', depth + 1)) return false;
+        tok += SUBST_Q; hasTok = true; continue;   // /dev/fd path: one token
+      }
+      // `<<<` herestring: a 3-char operator taking a WORD (not a heredoc body).
+      // Consumed whole so the scanner never re-reads its tail as a `<<` heredoc;
+      // the word that follows is scanned normally, so its expansions still recurse.
+      if (c === '<' && command[i + 1] === '<' && command[i + 2] === '<') {
+        start(i); tok += '<<<'; hasTok = true; i += 3; continue;
+      }
+
+      // Heredoc redirect: the body is DATA, not a command list.
+      if (c === '<' && command[i + 1] === '<') {
+        const opStart = i;
+        let j = i + 2;
+        const stripTabs = command[j] === '-';
+        if (stripTabs) j++;
+        while (j < n && (command[j] === ' ' || command[j] === '\t')) j++;
+        let delim = '';
+        let expands = true;                 // unquoted delimiter -> body expands
+        if (command[j] === "'" || command[j] === '"') {
+          const q = command[j];
+          const end = command.indexOf(q, j + 1);
+          if (end === -1) { unparseable = true; return false; }
+          delim = command.slice(j + 1, end); expands = false; j = end + 1;
+        } else {
+          const m = /^[^\s;|&()<>]+/.exec(command.slice(j));
+          if (m) { delim = m[0]; j += delim.length; }
+        }
+        if (!delim) { start(i); tok += c; hasTok = true; i++; continue; } // not a heredoc
+        // Body runs from the next newline to a line that is exactly the delimiter.
+        const nl = command.indexOf('\n', j);
+        if (nl === -1) { unparseable = true; return false; }
+        const lines = command.slice(nl + 1).split('\n');
+        let consumed = 0;
+        let closed = false;
+        const body = [];
+        for (const line of lines) {
+          consumed += line.length + 1;      // +1 for the newline
+          if ((stripTabs ? line.replace(/^\t+/, '') : line) === delim) { closed = true; break; }
+          body.push(line);
+        }
+        if (!closed) { unparseable = true; return false; }
+        // An unquoted delimiter expands the body, so a substitution in there really
+        // runs; that is not statically analyzable here -> fail closed.
+        if (expands && /\$\(|`/.test(body.join('\n'))) { unparseable = true; return false; }
+        start(opStart);
+        tok += command.slice(opStart, j);   // keep `<<EOF` as a redirect-ish token
+        hasTok = true;
+        i = Math.min(nl + 1 + consumed, n);
+        continue;
+      }
+
+      // Bare `( ... )` subshell group — only when it starts a word, so an array
+      // literal (`paths=(a b)`) keeps its old literal treatment. Its commands run
+      // but its stdout is not captured, so no SUBST.
+      if (c === '(' && !hasTok) {
+        pushSeg(); i += 1;
+        if (!scanList(')', depth + 1)) return false;
+        continue;
+      }
+
+      if (c === '\\') { // escape next char literally
+        if (i + 1 < n) { start(i); tok += command[i + 1]; hasTok = true; i += 2; continue; }
+        i++; continue;
+      }
+      if (c === "'") { // single-quoted: literal until next ' (no expansion in bash)
+        const end = command.indexOf("'", i + 1);
+        if (end === -1) { unparseable = true; return false; }
+        start(i); tok += command.slice(i + 1, end); hasTok = true; i = end + 1; continue;
+      }
+      if (c === '"') { // double-quoted: honor \ escapes AND nested substitutions
+        start(i); i += 1;
+        let closed = false;
+        while (i < n) {
+          const d = command[i];
+          if (d === '"') { i += 1; closed = true; break; }
+          if (d === '\\' && i + 1 < n) { tok += command[i + 1]; i += 2; continue; }
+          if (d === '$' && command[i + 1] === '(' && command[i + 2] === '(') {
+            if (!skipArith()) { unparseable = true; return false; }
+            tok += SUBST_Q; continue;
+          }
+          if (d === '$' && command[i + 1] === '(') {
+            i += 2;
+            if (!scanList(')', depth + 1)) return false;
+            tok += SUBST_Q; continue;
+          }
+          if (d === '`') {
+            i += 1;
+            if (!scanList('`', depth + 1)) return false;
+            tok += SUBST_Q; continue;
+          }
+          tok += d; i += 1;
+        }
+        if (!closed) { unparseable = true; return false; }
+        hasTok = true; continue;
+      }
+
+      // Operators (outside quotes) -> segment boundaries.
+      if (c === '&') {
+        // `>&` fd-duplication (2>&1, >&2, 1>&2, 2>&-) is a redirect, not an
+        // operator: keep the `&` attached to the current token (stripped later).
+        // `&&` (logical) and lone `&` (background) stay segment boundaries.
+        if (command[i + 1] !== '&' && hasTok && tok.endsWith('>')) { tok += c; i++; continue; }
+        pushSeg();
+        i += (command[i + 1] === '&') ? 2 : 1; // && vs lone &
+        continue;
+      }
+      if (c === '|') {
+        pushSeg();
+        i += (command[i + 1] === '|') ? 2 : 1; // || vs |
+        continue;
+      }
+      if (c === ';') { pushSeg(); i++; continue; }
+      if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { pushTok(); i++; continue; }
+
+      start(i); tok += c; hasTok = true; i++;
+    }
+
+    if (close) { unparseable = true; return false; } // unterminated substitution
+    pushSeg();
+    return true;
+  }
+
+  scanList(null, 0);
   return { segments, unparseable };
 }
 
@@ -267,6 +424,12 @@ function evaluate(cfg, args) {
   return { decision: cfg.default || 'allow', reason: '' };
 }
 
+// Render an argv for a human-facing reason string, with expansion sentinels shown
+// as `$(…)` rather than raw NULs.
+function display(args) {
+  return args.join(' ').split(SUBST).join('$(…)').split(SUBST_Q).join('$(…)');
+}
+
 // ---- Main -----------------------------------------------------------------
 
 function main() {
@@ -317,11 +480,41 @@ function main() {
       continue;
     }
 
+    // The command word itself comes out of an expansion (`$(which git) status`):
+    // the binary is unknowable, so no config can be resolved -> fail closed, scoped
+    // to commands that mention a managed tool (same scoping as `sh -c`).
+    if (values[0].includes(SUBST) || values[0].includes(SUBST_Q)) {
+      if (mentionsManaged()) { managedCount++; bump({ decision: 'deferInAuto', reason: 'command-policy: command word comes from a shell expansion — cannot resolve the binary; approve to run.' }); }
+      else unmanagedCount++;
+      continue;
+    }
+
     const real = resolveBinary(values[0]);
     const cfg = configFor(real, values[0], cfgs);
     if (!cfg) { unmanagedCount++; continue; }
 
-    const v = evaluate(cfg, values.slice(1));
+    const args = values.slice(1);
+    const v = evaluate(cfg, args);
+
+    // An UNQUOTED expansion word-splits, so it can add arbitrary argv tokens and
+    // matching is only sound in the positive direction: a rule that DID match still
+    // holds, but a rule that did not may have matched the expansion's real value. If
+    // this tool has any rule stronger than allow/rewrite, that unknown is a
+    // can't-analyze case -> deferInAuto (never rewrite/allow on an argv we cannot
+    // see). Tools with no stronger bucket (head, tail, the interpreters) lose
+    // nothing, so they stay silent.
+    // A QUOTED expansion is deliberately NOT gated: it is exactly one token, which
+    // is the same "unknown string, known shape" case as a bare $VAR (also not
+    // gated). Gating it would prompt on every `git commit -m "$(cat <<'EOF' …)"`
+    // while leaving the equivalent $VAR path open — no real gain, high friction.
+    if (args.some((a) => a.includes(SUBST))
+        && ((cfg.deny || []).length || (cfg.ask || []).length || (cfg.deferInAuto || []).length)) {
+      managedCount++;
+      bump({ decision: 'deferInAuto', reason: `command-policy: '${cfg.tool}' takes an argument from a shell expansion — cannot check it against policy; approve to run.` });
+      if (v.decision === 'deny' || v.decision === 'ask') bump(v);
+      continue;
+    }
+
     // abstain: a managed tool whose specific invocation isn't governed -> treat as
     // pass-through so the normal permission flow handles it (never blanket-allowed).
     if (v.decision === 'abstain') { unmanagedCount++; continue; }
@@ -332,15 +525,16 @@ function main() {
       continue;
     }
     if (v.decision !== 'allow' && !v.reason) {
-      v.reason = `command-policy: '${cfg.tool} ${values.slice(1).join(' ')}' requires approval.`;
+      v.reason = `command-policy: '${cfg.tool} ${display(args)}' requires approval.`;
     }
     bump(v);
   }
 
   // Unparseable input: fail closed ONLY if a managed tool is mentioned. This is a
   // can't-analyze case -> deferInAuto (prompt interactively, pass through in auto).
+  // Substitutions are parsed now, so this is only genuinely unbalanced input.
   if (unparseable && mentionsManaged()) {
-    bump({ decision: 'deferInAuto', reason: 'command-policy: command not statically parseable (command substitution / unbalanced quotes) and mentions a gated tool — approve to run.' });
+    bump({ decision: 'deferInAuto', reason: 'command-policy: command not statically parseable (unterminated quote or expansion) and mentions a gated tool — approve to run.' });
     managedCount++;
   }
 
@@ -378,3 +572,4 @@ function main() {
 }
 
 main();
+x
